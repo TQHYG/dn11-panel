@@ -125,6 +125,4 @@ www-data ALL=(ALL) NOPASSWD: /usr/bin/wg, /usr/bin/birdc, /usr/sbin/ip, /usr/bin
 5. 将 `web/` 目录部署到任意 Web 服务器（或直接用浏览器打开 `index.html`）。
 6. 访问前端页面即可开始使用。
 
-## License
 
-MIT

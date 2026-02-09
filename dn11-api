@@ -1,0 +1,615 @@
+#!/bin/sh
+
+printf "Access-Control-Allow-Origin: *\r\n"
+printf "Access-Control-Allow-Methods: GET, POST, OPTIONS\r\n"
+printf "Access-Control-Allow-Headers: Content-Type\r\n"
+
+# Handle CORS preflight
+if [ "$REQUEST_METHOD" = "OPTIONS" ]; then
+    printf "Content-Type: text/plain\r\n\r\n"
+    exit 0
+fi
+
+# DN11 Network API CGI Script
+# Deploy on OpenWrt as /www/cgi-bin/dn11-api
+# Requires: bird, wireguard-tools, iproute2, ping, tcping, host/nslookup
+
+# ============================================
+# Configuration
+# ============================================
+BIRD_CONFIG="/etc/bird/bgp_peers.conf"
+WIREGUARD_DIR="/etc/wireguard"
+MAX_HANDSHAKE_AGE=180
+API_SECRET="CHANGE_ME"
+
+# ============================================
+# Helper Functions
+# ============================================
+
+# Safe print JSON response
+json_response() {
+    printf "Content-Type: application/json\r\n\r\n"
+    printf '%s' "$1"
+}
+
+# Escape JSON special characters
+json_escape() {
+    printf '%s' "$1" | sed -e ':a' -e 'N' -e '$!ba' \
+        -e 's/\\/\\\\/g' \
+        -e 's/"/\\"/g' \
+        -e 's/\//\\\//g' \
+        -e 's/\x08/\\b/g' \
+        -e 's/\x0C/\\f/g' \
+        -e 's/\x0A/\\n/g' \
+        -e 's/\x0D/\\r/g' \
+        -e 's/\x09/\\t/g'
+}
+
+# Validate IP address
+is_valid_ip() {
+    echo "$1" | grep -Eq '^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$'
+}
+
+# Validate CIDR or IP
+is_valid_cidr_or_ip() {
+    echo "$1" | grep -Eq '^(([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])\.){3}([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])(\/([0-9]|[1-2][0-9]|3[0-2]))?$'
+}
+
+# Validate domain name
+is_valid_domain() {
+    echo "$1" | grep -Eq '^([a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z0-9]{2,15}$'
+}
+
+# Validate port number
+is_valid_port() {
+    [ "$1" -ge 1 ] 2>/dev/null && [ "$1" -le 65535 ] 2>/dev/null
+}
+
+# Validate protocol name (only letters, numbers, dash, underscore)
+is_valid_protocol_name() {
+    echo "$1" | grep -Eq '^[a-zA-Z0-9_-]+$'
+}
+
+# Execute command with timeout and capture output
+safe_exec() {
+    "$@" 2>&1
+    return $?
+}
+
+# ============================================
+# API Functions
+# ============================================
+
+get_peers_status() {
+    # Get current timestamp
+    NOW=$(date +%s)
+    
+    # Array to hold peer information
+    peers_json="["
+    
+    # Find all DN11 WireGuard interfaces
+    for wg_conf in "$WIREGUARD_DIR"/dn11-*.conf; do
+        [ -e "$wg_conf" ] || continue
+        
+        # Extract interface name from filename
+        interface=$(basename "$wg_conf" .conf)
+        
+        # Extract tunnel IP from WireGuard config
+        tunnel_ip=""
+        if grep -q "PostUp.*ip addr add" "$wg_conf"; then
+            tunnel_line=$(grep "PostUp.*ip addr add" "$wg_conf")
+            tunnel_ip=$(echo "$tunnel_line" | sed -n "s/.*peer \([0-9./]\+\).*/\1/p")
+        fi
+        
+        # Extract ASN from BIRD config
+        asn=""
+        peer_block=$(grep -A 5 "protocol bgp '$interface'" "$BIRD_CONFIG" 2>/dev/null)
+        if [ -n "$peer_block" ]; then
+            asn=$(echo "$peer_block" | grep "as " | awk '{print $NF}' | tr -d ';')
+        fi
+        
+        # Check WireGuard status
+        wg_status="down"
+        wg_error=""
+        wg_last_handshake=$(wg show "$interface" latest-handshakes 2>/dev/null | awk '{print $2}')
+        
+        if [ -n "$wg_last_handshake" ] && [ "$wg_last_handshake" -ne 0 ]; then
+            diff=$((NOW - wg_last_handshake))
+            if [ "$diff" -lt "$MAX_HANDSHAKE_AGE" ]; then
+                wg_status="up"
+            else
+                wg_status="down"
+                wg_error="Last handshake ${diff}s ago"
+            fi
+        else
+            wg_status="down"
+            wg_error="No handshake recorded"
+        fi
+        
+        # Check BIRD status
+        bird_status="down"
+        bird_error=""
+        bird_output=$(safe_exec birdc show protocols 2>/dev/null | grep "^$interface")
+        
+        if echo "$bird_output" | grep -q "Established"; then
+            bird_status="up"
+            bird_error=""
+        elif [ -z "$bird_output" ]; then
+            bird_status="down"
+            bird_error="Not found in BIRD"
+        else
+            bird_status="down"
+            bird_state=$(echo "$bird_output" | awk '{print $4}')
+            bird_info=$(echo "$bird_output" | awk '{print $6}')
+            bird_detail=$(echo "$bird_output" | awk '{for(i=7;i<=NF;i++) printf("%s ", $i)}' | sed 's/ $//')
+            if [ -n "$bird_detail" ]; then
+                bird_error="State: $bird_state, Info: $bird_info, Error: $bird_detail"
+            else
+                bird_error="State: $bird_state, Info: $bird_info"
+            fi
+        fi
+        
+        # Determine overall status and error summary
+        overall_status="healthy"
+        error_summary=""
+        
+        if [ "$wg_status" = "down" ] || [ "$bird_status" = "down" ]; then
+            overall_status="unhealthy"
+            
+            if [ "$wg_status" = "down" ] && [ "$bird_status" = "down" ]; then
+                error_summary="WG: $wg_error, BIRD: $bird_error"
+            elif [ "$wg_status" = "down" ]; then
+                error_summary="WG: $wg_error"
+            else
+                error_summary="BIRD: $bird_error"
+            fi
+        fi
+        
+        # Add to JSON array
+        if [ "$peers_json" != "[" ]; then
+            peers_json="$peers_json,"
+        fi
+        
+        peer_json="{\"interface\":\"$interface\",\"asn\":\"$asn\",\"tunnel_ip\":\"$tunnel_ip\",\"wg_status\":\"$wg_status\",\"bird_status\":\"$bird_status\",\"overall_status\":\"$overall_status\""
+        
+        if [ -n "$error_summary" ]; then
+            error_escaped=$(json_escape "$error_summary")
+            peer_json="$peer_json,\"error_summary\":\"$error_escaped\""
+        fi
+        
+        peers_json="$peers_json$peer_json}"
+    done
+    
+    peers_json="$peers_json]"
+    
+    # Create response
+    json="{\"status\":\"success\",\"data\":$peers_json}"
+    json_response "$json"
+}
+
+get_routing_table() {
+    # Get routing table
+    routes=$(safe_exec ip route show)
+    
+    # Convert to JSON array
+    routes_json="["
+    first=true
+    while IFS= read -r route; do
+        if [ "$first" = true ]; then
+            first=false
+        else
+            routes_json="$routes_json,"
+        fi
+        
+        route_escaped=$(json_escape "$route")
+        routes_json="$routes_json\"$route_escaped\""
+    done <<EOF
+$routes
+EOF
+    routes_json="$routes_json]"
+    
+    json="{\"status\":\"success\",\"data\":$routes_json}"
+    json_response "$json"
+}
+
+bird_show() {
+    # get cmd
+    query="$QUERY_STRING"
+    cmd=$(echo "$query" | sed -n 's/.*cmd=\([^&]*\).*/\1/p')
+    param=$(echo "$query" | sed -n 's/.*param=\([^&]*\).*/\1/p')
+    name=$(echo "$query" | sed -n 's/.*name=\([^&]*\).*/\1/p')
+    target_ip=$(echo "$query" | sed -n 's/.*ip=\([^&]*\).*/\1/p')
+    route_all=$(echo "$query" | sed -n 's/.*route_all=\([^&]*\).*/\1/p')
+    
+    valid_commands="protocols route interfaces status"
+    valid="no"
+    for valid_cmd in $valid_commands; do
+        if [ "$cmd" = "$valid_cmd" ]; then
+            valid="yes"
+            break
+        fi
+    done
+    
+    if [ "$valid" != "yes" ]; then
+        json="{\"status\":\"error\",\"message\":\"Invalid command. Valid commands: protocols, route, interfaces, status\"}"
+        json_response "$json"
+        exit 0
+    fi
+    
+    if [ "$cmd" = "route" ]; then
+        handle_route_command
+        return
+    fi
+    
+    # Build birdc command
+    bird_cmd="show $cmd"
+    
+    if [ "$param" = "all" ]; then
+        bird_cmd="$bird_cmd all"
+    fi
+    
+    if [ -n "$name" ] && [ "$cmd" = "protocols" ]; then
+        if is_valid_protocol_name "$name"; then
+            bird_cmd="$bird_cmd \"$name\""
+        else
+            json="{\"status\":\"error\",\"message\":\"Invalid protocol name\"}"
+            json_response "$json"
+            exit 0
+        fi
+    fi
+    
+    # Execute birdc command
+    output=$(safe_exec birdc $bird_cmd)
+    
+    if [ $? -ne 0 ]; then
+        output_escaped=$(json_escape "$output")
+        json="{\"status\":\"error\",\"message\":\"Failed to execute birdc\",\"details\":\"$output_escaped\"}"
+        json_response "$json"
+        exit 0
+    fi
+    
+    # Convert output to JSON
+    output_escaped=$(json_escape "$output")
+    json="{\"status\":\"success\",\"command\":\"$bird_cmd\",\"output\":\"$output_escaped\"}"
+    json_response "$json"
+}
+
+handle_route_command() {
+    local bird_cmd="show route"
+    
+    if [ -n "$target_ip" ]; then
+        if ! is_valid_cidr_or_ip "$target_ip"; then
+            json="{\"status\":\"error\",\"message\":\"Invalid IP address\"}"
+            json_response "$json"
+            exit 0
+        fi
+        
+        bird_cmd="$bird_cmd for $target_ip"
+        
+        if [ "$route_all" = "1" ] || [ "$route_all" = "true" ]; then
+            bird_cmd="$bird_cmd all"
+        fi
+    else
+        if [ "$param" = "all" ]; then
+            bird_cmd="$bird_cmd all"
+        fi
+    fi
+    
+    if [ -n "$name" ]; then
+        if is_valid_protocol_name "$name"; then
+            bird_cmd="$bird_cmd protocol \"$name\""
+        else
+            json="{\"status\":\"error\",\"message\":\"Invalid protocol name\"}"
+            json_response "$json"
+            exit 0
+        fi
+    fi
+    
+    # exec command
+    output=$(safe_exec birdc $bird_cmd)
+    
+    if [ $? -ne 0 ]; then
+        output_escaped=$(printf '%s' "$output" | json_escape)
+        json="{\"status\":\"error\",\"message\":\"Failed to execute birdc\",\"details\":\"$output_escaped\"}"
+        json_response "$json"
+        exit 0
+    fi
+    
+    output_escaped=$(json_escape "$output")
+    json="{\"status\":\"success\",\"command\":\"$bird_cmd\",\"output\":\"$output_escaped\"}"
+    json_response "$json"
+}
+
+execute_ping() {
+    # Get host parameter
+    query="$QUERY_STRING"
+    host=$(echo "$query" | sed -n 's/.*host=\([^&]*\).*/\1/p')
+    
+    # Validate host
+    if [ -z "$host" ]; then
+        json="{\"status\":\"error\",\"message\":\"Host parameter is required\"}"
+        json_response "$json"
+        exit 0
+    fi
+    
+    # Clean host (remove any dangerous characters)
+    clean_host=$(echo "$host" | tr -d ';|&$()<>`')
+    
+    # Validate it's a valid IP or domain
+    if ! is_valid_ip "$clean_host" && ! is_valid_domain "$clean_host"; then
+        json="{\"status\":\"error\",\"message\":\"Invalid IP address or domain name\"}"
+        json_response "$json"
+        exit 0
+    fi
+    
+    # Execute single ping with timeout
+    output=$(safe_exec ping -c 1 -W 2 "$clean_host" | grep "from")
+    
+    output_escaped=$(json_escape "$output")
+    json="{\"status\":\"success\",\"host\":\"$clean_host\",\"output\":\"$output_escaped\"}"
+    json_response "$json"
+}
+
+execute_tcping() {
+    # Get parameters
+    query="$QUERY_STRING"
+    host=$(echo "$query" | sed -n 's/.*host=\([^&]*\).*/\1/p')
+    port=$(echo "$query" | sed -n 's/.*port=\([^&]*\).*/\1/p')
+    
+    # Validate parameters
+    if [ -z "$host" ] || [ -z "$port" ]; then
+        json="{\"status\":\"error\",\"message\":\"Host and port parameters are required\"}"
+        json_response "$json"
+        exit 0
+    fi
+    
+    # Clean host
+    clean_host=$(echo "$host" | tr -d ';|&$()<>`')
+    
+    # Validate host
+    if ! is_valid_ip "$clean_host" && ! is_valid_domain "$clean_host"; then
+        json="{\"status\":\"error\",\"message\":\"Invalid IP address or domain name\"}"
+        json_response "$json"
+        exit 0
+    fi
+    
+    # Validate port
+    if ! is_valid_port "$port"; then
+        json="{\"status\":\"error\",\"message\":\"Invalid port number\"}"
+        json_response "$json"
+        exit 0
+    fi
+    
+    # Check if tcping is available
+    if ! command -v tcping >/dev/null 2>&1; then
+        json="{\"status\":\"error\",\"message\":\"tcping command not found\"}"
+        json_response "$json"
+        exit 0
+    fi
+    
+    # Execute single tcping
+    output=$(safe_exec tcping -c 1 -p "$port" "$clean_host" 2>&1 | grep "response from")
+    
+    output_escaped=$(json_escape "$output")
+    json="{\"status\":\"success\",\"host\":\"$clean_host\",\"port\":$port,\"output\":\"$output_escaped\"}"
+    json_response "$json"
+}
+
+execute_nslookup() {
+    # Get parameters
+    query="$QUERY_STRING"
+    query_host=$(echo "$query" | sed -n 's/.*host=\([^&]*\).*/\1/p')
+    dns_server=$(echo "$query" | sed -n 's/.*dns=\([^&]*\).*/\1/p')
+    
+    # Validate query host
+    if [ -z "$query_host" ]; then
+        json="{\"status\":\"error\",\"message\":\"Host parameter is required\"}"
+        json_response "$json"
+        exit 0
+    fi
+    
+    # Clean inputs
+    clean_query=$(echo "$query_host" | tr -d ';|&$()<>`')
+    
+    # Check if it's a reverse lookup (IP address)
+    if is_valid_ip "$clean_query"; then
+        lookup_type="reverse"
+        # For reverse lookup, format the IP properly
+        if [ -n "$dns_server" ] && is_valid_ip "$dns_server"; then
+            # Use host command for reverse lookup with specific DNS
+            output=$(safe_exec host "$clean_query" "$dns_server")
+        else
+            output=$(safe_exec host "$clean_query")
+        fi
+    elif is_valid_domain "$clean_query"; then
+        lookup_type="forward"
+        if [ -n "$dns_server" ] && is_valid_ip "$dns_server"; then
+            output=$(safe_exec host "$clean_query" "$dns_server")
+        else
+            output=$(safe_exec host "$clean_query")
+        fi
+    else
+        json="{\"status\":\"error\",\"message\":\"Invalid IP address or domain name\"}"
+        json_response "$json"
+        exit 0
+    fi
+    
+    # Check if host command succeeded, try nslookup as fallback
+    if [ $? -ne 0 ] || [ -z "$output" ]; then
+        if command -v nslookup >/dev/null 2>&1; then
+            if [ -n "$dns_server" ] && is_valid_ip "$dns_server"; then
+                output=$(safe_exec nslookup "$clean_query" "$dns_server")
+            else
+                output=$(safe_exec nslookup "$clean_query")
+            fi
+        fi
+    fi
+    
+    output_escaped=$(json_escape "$output")
+    json="{\"status\":\"success\",\"query\":\"$clean_query\",\"lookup_type\":\"$lookup_type\",\"dns_server\":\"$dns_server\",\"output\":\"$output_escaped\"}"
+    json_response "$json"
+}
+
+# Check specialized cloud connection
+# ============================================
+# 以下变量需要根据你的实际网络拓扑修改
+# interface: 连接到服务器的 WireGuard 接口名（格式: {你的昵称}-cloud）
+# bgp_proto: BIRD 中对应的 iBGP 协议名
+# cloud_ip / tunnel_ip: 服务器侧的内网 IP 和隧道 IP
+# ============================================
+check_cloud_connection() {
+    local cloud_ip="172.16.80.250"
+    local tunnel_ip="172.16.80.253"
+    local interface="name-cloud"       # 改为你的接口名，如 alice-cloud
+    local bgp_proto="IBGP-cloud"       # 改为你 BIRD 配置中对应的 iBGP 协议名
+
+    # 1. Check WireGuard Interface
+    wg_up=$(ip link show "$interface" 2>/dev/null | grep -q "UP" && echo "up" || echo "down")
+    
+    # 2. Check OSPF Neighbor Status
+    ospf_output=$(birdc show ospf neighbors 2>/dev/null | grep "$interface")
+    ospf_status="down"
+    if echo "$ospf_output" | grep -q "Full"; then
+        ospf_status="up"
+    fi
+
+    # 3. Check BFD Status
+    bfd_status=$(birdc show bfd sessions 2>/dev/null | grep "$tunnel_ip" | grep -q "Up" && echo "up" || echo "down")
+
+    # 4. Check iBGP Status
+    ibgp_status=$(birdc show protocols 2>/dev/null | grep "^$bgp_proto" | grep -q "Established" && echo "up" || echo "down")
+
+    # 5. Check System Routing Table
+    route_status=$(ip route show "$cloud_ip" 2>/dev/null | grep -q "dev $interface" && echo "present" || echo "missing")
+
+    # Determine Health
+    is_healthy="false"
+    if [ "$wg_up" = "up" ] && [ "$ospf_status" = "up" ] && [ "$ibgp_status" = "up" ] && [ "$route_status" = "present" ]; then
+        is_healthy="true"
+    fi
+
+    # Build JSON
+    json="{\"status\":\"success\",\"data\":{"
+    json="$json\"interface\":\"$interface\","
+    json="$json\"healthy\":$is_healthy,"
+    json="$json\"checks\":{"
+    json="$json\"wireguard\":\"$wg_up\","
+    json="$json\"ospf\":\"$ospf_status\","
+    json="$json\"bfd\":\"$bfd_status\","
+    json="$json\"ibgp\":\"$ibgp_status\","
+    json="$json\"system_route\":\"$route_status\""
+    json="$json}}}"
+
+    json_response "$json"
+}
+
+# ============================================
+# Authentication
+# ============================================
+
+verify_auth() {
+    local name="$1" peer_ip="$2" pubkey="$3" endpoint="$4" asn="$5" timestamp="$6" token="$7"
+
+    [ -z "$timestamp" ] && { json_response '{"status":"error","message":"Missing timestamp"}'; exit 0; }
+    [ -z "$token" ] && { json_response '{"status":"error","message":"Missing auth token"}'; exit 0; }
+
+    # Check timestamp within 300s window
+    now=$(date +%s)
+    diff=$((now - timestamp))
+    [ "$diff" -lt 0 ] && diff=$(( -diff ))
+    [ "$diff" -gt 300 ] && { json_response '{"status":"error","message":"Auth token expired"}'; exit 0; }
+
+    # Compute expected token: sha256(secret + timestamp + sorted_params)
+    param_str="asn=${asn}&endpoint=${endpoint}&name=${name}&peer_ip=${peer_ip}&pubkey=${pubkey}"
+    expected=$(printf '%s' "${API_SECRET}${timestamp}${param_str}" | sha256sum | awk '{print $1}')
+
+    [ "$token" != "$expected" ] && { json_response '{"status":"error","message":"Invalid auth token"}'; exit 0; }
+}
+
+# ============================================
+# Add Peer
+# ============================================
+
+add_peer() {
+    # Read POST body
+    POST_DATA=""
+    if [ -n "$CONTENT_LENGTH" ] && [ "$CONTENT_LENGTH" -gt 0 ] 2>/dev/null; then
+        POST_DATA=$(dd bs=1 count="$CONTENT_LENGTH" 2>/dev/null)
+    fi
+
+    [ -z "$POST_DATA" ] && { json_response '{"status":"error","message":"No POST data"}'; exit 0; }
+
+    # Parse JSON parameters
+    p_name=$(echo "$POST_DATA" | sed -n 's/.*"name" *: *"\([^"]*\)".*/\1/p')
+    p_peer_ip=$(echo "$POST_DATA" | sed -n 's/.*"peer_ip" *: *"\([^"]*\)".*/\1/p')
+    p_pubkey=$(echo "$POST_DATA" | sed -n 's/.*"pubkey" *: *"\([^"]*\)".*/\1/p')
+    p_endpoint=$(echo "$POST_DATA" | sed -n 's/.*"endpoint" *: *"\([^"]*\)".*/\1/p')
+    p_asn=$(echo "$POST_DATA" | sed -n 's/.*"asn" *: *"\([^"]*\)".*/\1/p')
+    p_timestamp=$(echo "$POST_DATA" | sed -n 's/.*"timestamp" *: *"\([^"]*\)".*/\1/p')
+    p_token=$(echo "$POST_DATA" | sed -n 's/.*"token" *: *"\([^"]*\)".*/\1/p')
+
+    # Verify authentication
+    verify_auth "$p_name" "$p_peer_ip" "$p_pubkey" "$p_endpoint" "$p_asn" "$p_timestamp" "$p_token"
+
+    # Validate inputs
+    echo "$p_name" | grep -qE '^[a-z0-9]{1,6}$' || { json_response '{"status":"error","message":"Invalid peer name"}'; exit 0; }
+    is_valid_ip "$p_peer_ip" || { json_response '{"status":"error","message":"Invalid peer IP"}'; exit 0; }
+    [ -z "$p_pubkey" ] && { json_response '{"status":"error","message":"Public key required"}'; exit 0; }
+    [ -z "$p_asn" ] && { json_response '{"status":"error","message":"ASN required"}'; exit 0; }
+    [ -z "$p_endpoint" ] && { json_response '{"status":"error","message":"Endpoint required (router is behind NAT)"}'; exit 0; }
+
+    # Call dn11-peer-op in batch mode
+    result=$(dn11-peer-op --batch \
+        --name "$p_name" \
+        --peer-ip "$p_peer_ip" \
+        --pubkey "$p_pubkey" \
+        --endpoint "$p_endpoint" \
+        --asn "$p_asn" 2>/tmp/dn11-add-peer-last.log)
+
+    if [ -n "$result" ]; then
+        json_response "$result"
+    else
+        log=$(tail -20 /tmp/dn11-add-peer-last.log 2>/dev/null)
+        log_escaped=$(json_escape "$log")
+        json_response "{\"status\":\"error\",\"message\":\"Script produced no output\",\"log\":\"$log_escaped\"}"
+    fi
+}
+
+# ============================================
+# Main Router
+# ============================================
+
+# Parse action parameter
+query="$QUERY_STRING"
+action=$(echo "$query" | sed -n 's/.*action=\([^&]*\).*/\1/p')
+
+case "$action" in
+    "get_peers")
+        get_peers_status
+        ;;
+    "get_routes")
+        get_routing_table
+        ;;
+    "bird_show")
+        bird_show
+        ;;
+    "check_cloud") 
+        check_cloud_connection
+        ;;
+    "ping")
+        execute_ping
+        ;;
+    "tcping")
+        execute_tcping
+        ;;
+    "nslookup")
+        execute_nslookup
+        ;;
+    "add_peer")
+        add_peer
+        ;;
+    *)
+        json="{\"status\":\"error\",\"message\":\"Invalid action. Valid actions: get_peers, get_routes, check_cloud, bird_show, ping, tcping, nslookup\"}"
+        json_response "$json"
+        ;;
+esac

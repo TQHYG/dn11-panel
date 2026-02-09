@@ -1,0 +1,82 @@
+body {
+    font-family: 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    background-color: #f8f9fa;
+}
+
+th, .table th, .modal-body th, .text-warning {
+    font-family: 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+}
+
+.view-section {
+    animation: fadeIn 0.3s ease-in-out;
+}
+
+@keyframes fadeIn {
+    from { opacity: 0; transform: translateY(10px); }
+    to { opacity: 1; transform: translateY(0); }
+}
+
+/* Status Badges */
+.status-badge {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    display: inline-block;
+    margin-right: 5px;
+}
+.status-up { background-color: #28a745; box-shadow: 0 0 5px #28a745; }
+.status-down { background-color: #dc3545; }
+.status-unknown { background-color: #6c757d; }
+
+/* BGP Cards */
+.peer-card {
+    transition: transform 0.2s;
+    border-left: 4px solid #6c757d;
+}
+.peer-card.healthy { border-left-color: #28a745; }
+.peer-card.down { border-left-color: #dc3545; }
+.peer-card:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 .5rem 1rem rgba(0,0,0,.15)!important;
+}
+
+/* Console Logs */
+#ping-log {
+    font-family: 'Consolas', 'Monaco', monospace;
+    white-space: pre-wrap;
+}
+
+/* Trace Table */
+#trace-table td {
+    vertical-align: middle;
+}
+.hop-circle {
+    background: #000000;
+    color: white;
+    width: 24px;
+    height: 24px;
+    border-radius: 50%;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 0.8rem;
+    font-weight: bold;
+}
+
+.peer-card.down {
+    background-color: #fff5f5; /* 给错误的卡片一个很浅的红色背景 */
+}
+
+.peer-card .btn-outline-danger {
+    font-size: 0.75rem;
+    padding: 0.2rem 0.5rem;
+}
+
+/* Link Status Card */
+#link-status-container .card {
+    transition: border-color 0.3s;
+}
+#link-status-container .badge {
+    font-size: 0.85rem;
+}
+

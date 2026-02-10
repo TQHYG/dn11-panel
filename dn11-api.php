@@ -21,6 +21,7 @@ header('Content-Type: application/json');
 
 const WIREGUARD_DIR = "/etc/wireguard";
 const BIRD_CONFIG = "/etc/bird/ebgp_peers.conf";
+const BIRD_SOCKET = "/run/bird/bird.ctl"; // Debian 默认路径，按需修改
 const MAX_HANDSHAKE_AGE = 180;
 const API_SECRET = "CHANGE_ME";
 
@@ -83,6 +84,101 @@ check_access();
 // Helper Functions
 // ============================================
 
+/**
+ * 通过 UNIX socket 直接与 BIRD 通信（替代 birdc show 命令）
+ * 需要 www-data 用户在 bird 组中以获得 socket 访问权限:
+ *   usermod -aG bird www-data
+ *
+ * @param string $command  BIRD 命令，如 "show protocols"
+ * @return array ['output' => string, 'status' => int]
+ */
+function bird_query($command) {
+    $sock = @socket_create(AF_UNIX, SOCK_STREAM, 0);
+    if ($sock === false) {
+        return ['output' => 'Failed to create socket: ' . socket_strerror(socket_last_error()), 'status' => 1];
+    }
+
+    if (@socket_connect($sock, BIRD_SOCKET) === false) {
+        $err = socket_strerror(socket_last_error($sock));
+        socket_close($sock);
+        return ['output' => 'Failed to connect to BIRD socket: ' . $err, 'status' => 1];
+    }
+
+    // 读取 BIRD 欢迎消息 (0001 BIRD ...)
+    $welcome = '';
+    bird_read_response($sock, $welcome);
+
+    // 发送命令
+    socket_write($sock, $command . "\n");
+
+    // 读取完整响应
+    $output = '';
+    $status = bird_read_response($sock, $output);
+
+    socket_close($sock);
+
+    return ['output' => $output, 'status' => $status];
+}
+
+/**
+ * 读取 BIRD socket 响应直到收到终止行
+ * BIRD 协议: 每行以 4 位数字开头
+ *   0000 = 欢迎/结束, 0001 = 普通输出
+ *   1xxx = 信息, 8xxx/9xxx = 错误
+ *   以空格开头的行 = 续行（属于上一条）
+ *   单独的 4 位数字行 = 终止
+ */
+function bird_read_response($sock, &$output) {
+    $status = 0;
+    $buf = '';
+    while (true) {
+        $chunk = @socket_read($sock, 4096);
+        if ($chunk === false || $chunk === '') break;
+        $buf .= $chunk;
+
+        // 逐行处理，检查是否收到终止行
+        while (($pos = strpos($buf, "\n")) !== false) {
+            $line = substr($buf, 0, $pos);
+            $buf = substr($buf, $pos + 1);
+
+            // BIRD 响应行格式: "XXXX message" 或 "XXXX-message" (续行) 或 " continuation"
+            if (preg_match('/^(\d{4})([ -])(.*)$/', $line, $m)) {
+                $code = intval($m[1]);
+                $sep = $m[2];
+                $text = $m[3];
+
+                if ($code === 0) {
+                    // 0000/0001 = 终止/欢迎
+                    if ($sep === ' ') {
+                        return $status; // 终结行
+                    }
+                    // 0001-... 续行，追加输出
+                    $output .= $text . "\n";
+                } elseif ($code >= 8000) {
+                    $status = 1;
+                    $output .= $text . "\n";
+                    if ($sep === ' ') return $status;
+                } elseif ($code >= 1000) {
+                    // 信息/表头行
+                    $output .= $text . "\n";
+                    if ($sep === ' ') return $status;
+                } else {
+                    $output .= $text . "\n";
+                    if ($sep === ' ') return $status;
+                }
+            } else {
+                // 续行（以空格开头）—— BIRD 协议续行有一个前导空格标记，需去掉（与 birdc 行为一致）
+                if (strlen($line) > 0 && $line[0] === ' ') {
+                    $output .= substr($line, 1) . "\n";
+                } else {
+                    $output .= $line . "\n";
+                }
+            }
+        }
+    }
+    return $status;
+}
+
 function safe_exec($cmd) {
     // Escaping is handled by caller or specific logic, but we suppress stderr in output usually
     // Using sudo for privileged commands
@@ -120,8 +216,8 @@ function get_peers_status() {
         return WIREGUARD_DIR . "/" . $f;
     }, $files);
 
-    // 一次性获取 birdc 输出
-    $bird_all = safe_exec("birdc show protocols")['output'];
+    // 一次性获取 BIRD 协议状态（通过 socket）
+    $bird_all = bird_query("show protocols")['output'];
     $bird_lines = explode("\n", trim($bird_all));
 
     // 读取 BIRD 配置文件
@@ -244,7 +340,7 @@ function bird_show() {
         die(json_encode(['status' => 'error', 'message' => 'Invalid command']));
     }
 
-    $bird_cmd = "show " . escapeshellcmd($cmd);
+    $bird_cmd = "show " . $cmd;
 
     // Handle Route Command Specifics
     if ($cmd === 'route') {
@@ -252,23 +348,23 @@ function bird_show() {
             if (!is_valid_ip($target_ip) && strpos($target_ip, '/') === false) {
                 die(json_encode(['status' => 'error', 'message' => 'Invalid IP']));
             }
-            $bird_cmd .= " for " . escapeshellarg($target_ip);
+            $bird_cmd .= " for " . $target_ip;
         }
-        if ($param === 'all' || $route_all === '1') $bird_cmd .= " all"; // Modified: check route_all
+        if ($param === 'all' || $route_all === '1') $bird_cmd .= " all";
         if (!empty($name)) {
             if (!preg_match('/^[a-zA-Z0-9_-]+$/', $name)) die(json_encode(['status' => 'error']));
-            $bird_cmd .= " protocol " . escapeshellarg($name);
+            $bird_cmd .= ' protocol "' . $name . '"';
         }
     } else {
         // Handle Protocols/Status
         if ($param === 'all') $bird_cmd .= " all";
         if (!empty($name) && $cmd === 'protocols') {
             if (!preg_match('/^[a-zA-Z0-9_-]+$/', $name)) die(json_encode(['status' => 'error']));
-            $bird_cmd .= " \"" . escapeshellcmd($name) . "\"";
+            $bird_cmd .= ' "' . $name . '"';
         }
     }
 
-    $res = safe_exec("birdc " . $bird_cmd);
+    $res = bird_query($bird_cmd);
     
     if ($res['status'] !== 0) {
         die(json_encode(['status' => 'error', 'message' => 'Failed', 'details' => $res['output']]));
@@ -295,19 +391,18 @@ function check_router_connection() {
     $wg_up = (strpos($wg_check['output'], "UP") !== false) ? "up" : "down";
 
     // 2. Check OSPF Neighbor
-    // OSPF 邻居表里找对端 IP
-    $ospf_check = safe_exec("birdc show ospf neighbors");
+    $ospf_check = bird_query("show ospf neighbors");
     $ospf_status = (strpos($ospf_check['output'], $tunnel_ip) !== false && strpos($ospf_check['output'], "Full") !== false) ? "up" : "down";
 
     // 3. Check BFD
-    $bfd_check = safe_exec("birdc show bfd sessions");
+    $bfd_check = bird_query("show bfd sessions");
     $bfd_status = (strpos($bfd_check['output'], $tunnel_ip) !== false && strpos($bfd_check['output'], "Up") !== false) ? "up" : "down";
 
     // 4. Check iBGP
-    $bgp_check = safe_exec("birdc show protocols");
+    $bgp_check = bird_query("show protocols");
     // 简单检查 output 中是否有该协议且为 Established
     $ibgp_status = "down";
-    $pattern = '/^' . preg_quote($bgp_proto, '/') . '.*Established$/m';
+    $pattern = '/^' . preg_quote($bgp_proto, '/') . '.*Established\s*$/m';
 
     if (preg_match($pattern, $bgp_check['output'])) {
         $ibgp_status = "up";
@@ -438,7 +533,7 @@ function get_ospf_state() {
     // 返回纯文本，不用 JSON
     header('Content-Type: text/plain; charset=utf-8');
 
-    $res = safe_exec("birdc show ospf state");
+    $res = bird_query("show ospf state");
     echo $res['output'];
     exit;
 }

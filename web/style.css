@@ -80,3 +80,21 @@ th, .table th, .modal-body th, .text-warning {
     font-size: 0.85rem;
 }
 
+/* Mobile: prevent button icon+text from wrapping across lines */
+.btn {
+    white-space: nowrap;
+}
+
+/* Bird LG route cards: prevent long attributes from overflowing */
+.attrs-box {
+    overflow-wrap: break-word;
+    word-break: break-word;
+}
+.attrs-box .attr-row-stacked {
+    flex-direction: column;
+    align-items: stretch !important;
+}
+.attrs-box .attr-row-stacked .attr-val {
+    width: 100%;
+}
+

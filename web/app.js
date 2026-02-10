@@ -888,11 +888,17 @@ function buildBirdCard(e) {
             if (communities) {
                 val = communities.map(c => {
                     const clean = c.replace(/[()]/g, '');
-                    return `<span class="badge bg-info-subtle text-info-emphasis border border-info-subtle me-1 mb-1 font-monospace" style="font-size: 0.75rem;">
+                    return `<span class="badge bg-info-subtle text-info-emphasis border border-info-subtle font-monospace d-block text-end" style="font-size: 0.75rem;">
                                 <i class="fa-solid fa-tag small me-1"></i>${clean}
                             </span>`;
                 }).join('');
             }
+            // community 行使用堆叠布局，标签名左侧，三元组右侧每行一个
+            attrHtml += `<div class="d-flex justify-content-between border-bottom border-light small py-1 attr-row-stacked">
+                <span class="text-muted flex-shrink-0 mb-1">${key}</span>
+                <div class="d-flex flex-column align-items-end">${val || a}</div>
+            </div>`;
+            return; // forEach return, skip default layout below
         }
         // [解析] AS Path
         if (key.includes('as_path')) {

@@ -78,15 +78,22 @@ PHP 脚本，部署到服务器的 Web 服务中（如 Nginx + PHP-FPM）。
 - 修改 `check_access()` 中的域名白名单
 - 修改 `check_router_connection()` 中的接口名、IP、协议名等变量（已用注释标记）
 
-**依赖：** PHP 7.4+, bird2 / birdc, wireguard-tools, iproute2, ping, tcping（可选）, host, traceroute
+**依赖：** PHP 7.4+（需要 sockets 扩展）, bird2, wireguard-tools, iproute2, ping, tcping（可选）, host, traceroute
 
-**注意：** PHP 需要通过 `sudo` 执行部分特权命令。需要配置 visudo，为 web 服务运行用户（如 `www-data`）添加 NOPASSWD 权限，至少包括：
+**BIRD 通信：** PHP 通过 UNIX socket 直接与 BIRD 通信（`/run/bird/bird.ctl`），无需 `birdc` CLI。需要将 Web 服务用户加入 `bird` 组：
+
+```bash
+usermod -aG bird www-data
+systemctl restart php-fpm   # 或 apache2，视部署方式而定
+```
+
+**注意：** PHP 还需要通过 `sudo` 执行其他特权命令。需要配置 visudo，为 web 服务运行用户（如 `www-data`）添加 NOPASSWD 权限，至少包括：
 
 ```
-www-data ALL=(ALL) NOPASSWD: /usr/bin/wg, /usr/bin/birdc, /usr/sbin/ip, /usr/bin/ls, /usr/bin/cat, /usr/bin/ping, /usr/bin/host, /usr/bin/traceroute, /usr/bin/tcping, /path/to/dn11-peer
+www-data ALL=(ALL) NOPASSWD: /usr/bin/wg, /usr/sbin/ip, /usr/bin/ls, /usr/bin/cat, /usr/bin/ping, /usr/bin/host, /usr/bin/traceroute, /usr/bin/tcping, /path/to/dn11-peer
 ```
 
-请根据实际安装路径调整。
+请根据实际安装路径调整。socket 路径可在 `dn11-api.php` 顶部的 `BIRD_SOCKET` 常量中修改。
 
 ### dn11-peer — 服务器端添加 Peer 脚本
 

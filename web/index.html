@@ -72,9 +72,9 @@
     </div>
 
     <div id="view-bgp" class="view-section d-none">
-        <div class="d-flex justify-content-between align-items-center mb-3">
+        <div class="mb-3">
             <h4><i class="fa-solid fa-circle-nodes me-2"></i>BGP Peers — 路由器</h4>
-            <div class="d-flex gap-2">
+            <div class="d-flex justify-content-end gap-2">
                 <button class="btn btn-sm btn-outline-dark" onclick="showPeerInfo('router')"><i class="fa-solid fa-id-card"></i> Peer Info</button>
                 <button class="btn btn-sm btn-outline-success" onclick="showAddPeerModal('router')"><i class="fa-solid fa-plus"></i> 添加 Peer</button>
                 <button class="btn btn-sm btn-outline-primary" onclick="loadPeers()"><i class="fa-solid fa-rotate"></i> 刷新</button>
@@ -82,9 +82,9 @@
         </div>
         <div class="row" id="peers-container"></div>
 
-        <div class="d-flex justify-content-between align-items-center mb-3 mt-4">
+        <div class="mb-3 mt-4">
             <h4><i class="fa-solid fa-circle-nodes me-2"></i>BGP Peers — 服务器</h4>
-            <div class="d-flex gap-2">
+            <div class="d-flex justify-content-end gap-2">
                 <button class="btn btn-sm btn-outline-dark" onclick="showPeerInfo('server')"><i class="fa-solid fa-id-card"></i> Peer Info</button>
                 <button class="btn btn-sm btn-outline-success" onclick="showAddPeerModal('server')"><i class="fa-solid fa-plus"></i> 添加 Peer</button>
                 <button class="btn btn-sm btn-outline-primary" onclick="loadServerPeers()"><i class="fa-solid fa-rotate"></i> 刷新</button>
@@ -94,9 +94,9 @@
     </div>
 
     <div id="view-routes" class="view-section d-none">
-        <div class="d-flex justify-content-between align-items-center mb-3">
+        <div class="mb-3">
             <h4><i class="fa-solid fa-route me-2"></i>路由表</h4>
-            <div class="d-flex gap-2">
+            <div class="d-flex justify-content-end gap-2">
                 <select class="form-select form-select-sm" id="route-node-select" style="width: auto;" onchange="loadRoutes()">
                     <option value="router">路由器 (172.16.80.1)</option>
                     <option value="server">服务器 (172.16.80.250)</option>

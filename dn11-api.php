@@ -141,8 +141,9 @@ function get_peers_status() {
 
         // 提取 ASN
         $asn = "";
-        if (preg_match("/protocol bgp\s+'?" . preg_quote($interface, '/') . "'?.*?\{[^}]*neighbor.*as\s+(\d+);/s", $bird_conf, $matches)) {
-            $asn = $matches[1];
+        $asn_matches = [];
+        if (preg_match("/protocol\s+bgp\s+'" . preg_quote($interface, '/') . "'[^{]*\{[^}]*?\bas\s+(\d+)\s*;/s", $bird_conf, $asn_matches)) {
+            $asn = $asn_matches[1];
         }
 
         // WireGuard 状态检查
@@ -511,7 +512,7 @@ function add_peer() {
     }
 
     // Build command
-    $cmd = sprintf('dn11-peer --batch --name %s --peer-ip %s --pubkey %s --asn %s',
+    $cmd = sprintf('dn11-peer add --batch --name %s --peer-ip %s --pubkey %s --asn %s',
         escapeshellarg($name),
         escapeshellarg($peer_ip),
         escapeshellarg($pubkey),
@@ -526,6 +527,124 @@ function add_peer() {
 
     if (!empty(trim($result ?? ''))) {
         // Script outputs JSON directly, pass through
+        echo $result;
+    } else {
+        $log = @file_get_contents($log_file) ?: 'No log available';
+        echo json_encode(['status' => 'error', 'message' => 'Script produced no output', 'log' => $log]);
+    }
+}
+
+// ============================================
+// Get Peer Detail (authenticated)
+// ============================================
+
+function get_peer_detail() {
+    $name = $_GET['name'] ?? '';
+    $timestamp = $_GET['timestamp'] ?? '';
+    $token = $_GET['token'] ?? '';
+
+    if (!preg_match('/^[a-z0-9]{1,6}$/', $name)) {
+        die(json_encode(['status' => 'error', 'message' => 'Invalid peer name']));
+    }
+
+    verify_auth(['name' => $name], $timestamp, $token);
+
+    $interface = "dn11-{$name}";
+    $wg_conf_path = WIREGUARD_DIR . "/{$interface}.conf";
+
+    $conf_res = safe_exec("cat " . escapeshellarg($wg_conf_path));
+    if ($conf_res['status'] !== 0 || strpos($conf_res['output'], 'No such file') !== false) {
+        die(json_encode(['status' => 'error', 'message' => 'Peer not found']));
+    }
+    $conf_content = $conf_res['output'];
+
+    // Parse WG config
+    $pubkey = '';
+    $endpoint = '';
+    $listen_port = '';
+    $mtu = '';
+    $keepalive = false;
+    $peer_ip = '';
+
+    if (preg_match('/^PublicKey\s*=\s*(.+)$/m', $conf_content, $m)) $pubkey = trim($m[1]);
+    if (preg_match('/^Endpoint\s*=\s*(.+)$/m', $conf_content, $m)) $endpoint = trim($m[1]);
+    if (preg_match('/^ListenPort\s*=\s*(.+)$/m', $conf_content, $m)) $listen_port = trim($m[1]);
+    if (preg_match('/^MTU\s*=\s*(.+)$/m', $conf_content, $m)) $mtu = trim($m[1]);
+    if (preg_match('/^PersistentKeepalive\s*=\s*(\d+)/m', $conf_content, $m)) $keepalive = intval($m[1]) > 0;
+    if (preg_match('/PostUp.*peer\s+([\d.]+)/', $conf_content, $m)) $peer_ip = $m[1];
+
+    // Read ASN from BIRD config
+    $asn = '';
+    $bird_conf = safe_exec("cat " . BIRD_CONFIG)['output'];
+    if (preg_match("/protocol\s+bgp\s+'" . preg_quote($interface, '/') . "'[^{]*\{[^}]*?\bas\s+(\d+)\s*;/s", $bird_conf, $m)) {
+        $asn = $m[1];
+    }
+
+    echo json_encode([
+        'status' => 'success',
+        'data' => [
+            'name' => $name,
+            'pubkey' => $pubkey,
+            'peer_ip' => $peer_ip,
+            'endpoint' => $endpoint,
+            'asn' => $asn,
+            'listen_port' => $listen_port,
+            'mtu' => $mtu,
+            'keepalive' => $keepalive
+        ]
+    ]);
+}
+
+// ============================================
+// Edit Peer (authenticated)
+// ============================================
+
+function edit_peer() {
+    $input = json_decode(file_get_contents('php://input'), true);
+    if (!$input) {
+        die(json_encode(['status' => 'error', 'message' => 'Invalid JSON input']));
+    }
+
+    $name         = $input['name'] ?? '';
+    $peer_ip      = $input['peer_ip'] ?? '';
+    $pubkey       = $input['pubkey'] ?? '';
+    $endpoint     = $input['endpoint'] ?? '';
+    $asn          = $input['asn'] ?? '';
+    $listen_port  = $input['listen_port'] ?? '';
+    $mtu          = $input['mtu'] ?? '';
+    $keepalive    = $input['keepalive'] ?? '';
+    $timestamp    = $input['timestamp'] ?? '';
+    $token        = $input['token'] ?? '';
+
+    verify_auth([
+        'name' => $name,
+        'peer_ip' => $peer_ip,
+        'pubkey' => $pubkey,
+        'endpoint' => $endpoint,
+        'asn' => $asn,
+        'listen_port' => $listen_port,
+        'mtu' => $mtu,
+        'keepalive' => $keepalive
+    ], $timestamp, $token);
+
+    if (!preg_match('/^[a-z0-9]{1,6}$/', $name)) {
+        die(json_encode(['status' => 'error', 'message' => 'Invalid peer name']));
+    }
+
+    // Build command
+    $cmd = sprintf('dn11-peer edit --batch --name %s', escapeshellarg($name));
+    if (!empty($peer_ip))      $cmd .= sprintf(' --peer-ip %s', escapeshellarg($peer_ip));
+    if (!empty($pubkey))       $cmd .= sprintf(' --pubkey %s', escapeshellarg($pubkey));
+    if (!empty($endpoint))     $cmd .= sprintf(' --endpoint %s', escapeshellarg($endpoint));
+    if (!empty($asn))          $cmd .= sprintf(' --asn %s', escapeshellarg($asn));
+    if (!empty($listen_port))  $cmd .= sprintf(' --listen-port %s', escapeshellarg($listen_port));
+    if (!empty($mtu))          $cmd .= sprintf(' --mtu %s', escapeshellarg($mtu));
+    if (!empty($keepalive))    $cmd .= sprintf(' --keepalive %s', escapeshellarg($keepalive));
+
+    $log_file = '/tmp/dn11-edit-peer-' . time() . '.log';
+    $result = shell_exec("sudo $cmd 2>" . escapeshellarg($log_file));
+
+    if (!empty(trim($result ?? ''))) {
         echo $result;
     } else {
         $log = @file_get_contents($log_file) ?: 'No log available';
@@ -570,11 +689,17 @@ switch ($action) {
     case 'add_peer':
         add_peer();
         break;
+    case 'get_peer_detail':
+        get_peer_detail();
+        break;
+    case 'edit_peer':
+        edit_peer();
+        break;
     default:
         echo json_encode([
             'status' => 'error', 
             'message' => 'Invalid action',
-            'valid_actions' => ['get_peers', 'get_routes', 'check_router', 'bird_show', 'ping', 'tcping', 'nslookup', 'traceroute', 'ospf_state']
+            'valid_actions' => ['get_peers', 'get_routes', 'check_router', 'bird_show', 'ping', 'tcping', 'nslookup', 'traceroute', 'ospf_state', 'add_peer', 'get_peer_detail', 'edit_peer']
         ]);
         break;
 }

@@ -1,11 +1,18 @@
 #!/bin/bash
-# dn11-peer: 交互式添加 dn11 BGP peer
-# 用法: 以 root 身份运行 ./dn11-peer
+# dn11-peer: dn11 BGP peer 管理脚本（服务器版）
+# 用法:
+#   dn11-peer add                     交互式添加 peer
+#   dn11-peer add --batch [参数...]   批量模式添加 peer
+#   dn11-peer edit --batch [参数...]  批量模式编辑 peer
 
 # ==================== 配置区域 ====================
 PRIVATE_KEY="CHANGE_ME"
 LOCAL_TUNNEL_IP="172.16.80.253"
 # ==================================================
+
+# ---------- 子命令解析 ----------
+SUBCMD="${1:-}"
+shift 2>/dev/null || true
 
 # ---------- 模式处理 ----------
 BATCH_MODE=0
@@ -14,11 +21,14 @@ if [ "$1" = "--batch" ]; then
     shift
     while [ $# -gt 0 ]; do
         case "$1" in
-            --name)     name="$2"; shift 2;;
-            --peer-ip)  peer_ip="$2"; shift 2;;
-            --pubkey)   peer_pubkey="$2"; shift 2;;
-            --endpoint) endpoint="$2"; shift 2;;
-            --asn)      peer_asn="$2"; shift 2;;
+            --name)         name="$2"; shift 2;;
+            --peer-ip)      peer_ip="$2"; shift 2;;
+            --pubkey)       peer_pubkey="$2"; shift 2;;
+            --endpoint)     endpoint="$2"; shift 2;;
+            --asn)          peer_asn="$2"; shift 2;;
+            --listen-port)  listen_port="$2"; shift 2;;
+            --mtu)          mtu="$2"; shift 2;;
+            --keepalive)    keepalive="$2"; shift 2;;
             *) printf '{"status":"error","message":"Unknown argument: %s"}\n' "$1"; exit 1;;
         esac
     done
@@ -46,6 +56,10 @@ command -v wg-quick    >/dev/null 2>&1 || die "wg-quick 未安装"
 command -v firewall-cmd >/dev/null 2>&1 || die "firewall-cmd 未安装"
 command -v birdc       >/dev/null 2>&1 || die "birdc 未安装"
 
+# ============================================================
+# do_add: 添加新 peer
+# ============================================================
+do_add() {
 # ============================================================
 # Step 1: 获取 peer 名称
 # ============================================================
@@ -151,6 +165,7 @@ fi
 # 验证接口
 if ip link show "$IFACE" >/dev/null 2>&1; then
     info "接口 ${IFACE} 已成功启动"
+    systemctl enable wg-quick@"$IFACE" >/dev/null 2>&1 || warn "设置 ${IFACE} 开机自启失败，请手动检查"
     wg show "$IFACE"
 else
     die "接口 ${IFACE} 未出现在系统中，请手动排查"
@@ -202,3 +217,120 @@ if [ "$BATCH_MODE" = 1 ]; then
     printf '{"status":"success","message":"Peer %s added successfully","data":{"interface":"%s","listen_port":%d,"peer_ip":"%s","asn":"%s"}}\n' \
         "$name" "$IFACE" "$listen_port" "$peer_ip" "$peer_asn" >&3
 fi
+} # end do_add
+
+# ============================================================
+# do_edit: 编辑已有 peer（仅支持 --batch 模式）
+# ============================================================
+do_edit() {
+    [ "$BATCH_MODE" != 1 ] && die "edit 仅支持 --batch 模式"
+    [ -z "$name" ] && die "peer 名称不能为空"
+
+    IFACE="dn11-${name}"
+    WG_CONF="/etc/wireguard/${IFACE}.conf"
+    BIRD_CONF="/etc/bird/ebgp_peers.conf"
+
+    [ -f "$WG_CONF" ] || die "配置文件 ${WG_CONF} 不存在，peer '${name}' 未找到"
+
+    # ---------- 读取当前配置 ----------
+    cur_listen_port=$(grep -i '^ListenPort' "$WG_CONF" | awk '{print $NF}')
+    cur_mtu=$(grep -i '^MTU' "$WG_CONF" | awk '{print $NF}')
+    cur_pubkey=$(grep -i '^PublicKey' "$WG_CONF" | awk '{print $NF}')
+    cur_endpoint=$(grep -i '^Endpoint' "$WG_CONF" | awk '{print $NF}')
+    cur_keepalive=$(grep -i '^PersistentKeepalive' "$WG_CONF" | awk '{print $NF}')
+    cur_peer_ip=$(grep 'PostUp.*ip addr add' "$WG_CONF" | sed -n 's/.*peer \([0-9.]*\).*/\1/p')
+
+    cur_asn=""
+    peer_block=$(grep -A 5 "protocol bgp '${IFACE}'" "$BIRD_CONF" 2>/dev/null)
+    if [ -n "$peer_block" ]; then
+        cur_asn=$(echo "$peer_block" | grep ' as ' | awk '{print $NF}' | tr -d ';')
+    fi
+
+    # ---------- 合并变更（未提供的字段保持不变） ----------
+    new_pubkey="${peer_pubkey:-$cur_pubkey}"
+    new_endpoint="${endpoint:-$cur_endpoint}"
+    new_listen_port="${listen_port:-$cur_listen_port}"
+    new_mtu="${mtu:-$cur_mtu}"
+    new_peer_ip="${peer_ip:-$cur_peer_ip}"
+    new_asn="${peer_asn:-$cur_asn}"
+
+    if [ "$keepalive" = "on" ]; then
+        new_keepalive=16
+    elif [ "$keepalive" = "off" ]; then
+        new_keepalive=""
+    else
+        new_keepalive="$cur_keepalive"
+    fi
+
+    info "正在编辑 peer '${name}' ..."
+
+    # ---------- 停止接口 ----------
+    info "正在停止接口 ${IFACE} ..."
+    wg-quick down "$IFACE" 2>/dev/null || warn "接口关闭失败，尝试继续"
+
+    # ---------- 更新防火墙端口（如果 ListenPort 变更） ----------
+    if [ -n "$cur_listen_port" ] && [ -n "$new_listen_port" ] && [ "$new_listen_port" != "$cur_listen_port" ]; then
+        info "正在更新防火墙端口: ${cur_listen_port} -> ${new_listen_port} ..."
+        firewall-cmd --permanent --service=dn11 --remove-port="${cur_listen_port}/udp" 2>/dev/null
+        firewall-cmd --permanent --service=dn11 --add-port="${new_listen_port}/udp" \
+            || die "添加端口 ${new_listen_port}/udp 到 dn11 服务失败"
+        firewall-cmd --reload || die "防火墙重载失败"
+    fi
+
+    # ---------- 重写 WireGuard 配置 ----------
+    {
+        printf '[Interface]\n'
+        printf 'PrivateKey = %s\n' "$PRIVATE_KEY"
+        printf 'ListenPort = %s\n' "$new_listen_port"
+        printf 'PostUp = /sbin/ip addr add dev %%i %s/32 peer %s/32\n' "$LOCAL_TUNNEL_IP" "$new_peer_ip"
+        printf 'Table = off\n'
+        printf 'MTU = %s\n' "${new_mtu}"
+        printf '\n'
+        printf '[Peer]\n'
+        [ -n "$new_endpoint" ] && printf 'Endpoint = %s\n' "$new_endpoint"
+        printf 'PublicKey = %s\n' "$new_pubkey"
+        printf 'AllowedIPs = 10.0.0.0/8, 100.64.0.0/10, 172.16.0.0/12, 192.168.0.0/16\n'
+        if [ -n "$new_keepalive" ]; then
+            printf 'PersistentKeepalive = %s\n' "$new_keepalive"
+        else
+            printf '#PersistentKeepalive = 16\n'
+        fi
+    } > "$WG_CONF"
+    chmod 600 "$WG_CONF"
+    info "WireGuard 配置已更新"
+
+    # ---------- 启动接口 ----------
+    info "正在启动接口 ${IFACE} ..."
+    if ! wg-quick up "$IFACE"; then
+        die "接口启动失败，请手动检查 ${WG_CONF}"
+    fi
+    info "接口 ${IFACE} 已启动"
+
+    # ---------- 更新 BIRD 配置（如果 ASN 或 peer IP 变更） ----------
+    if [ "$new_asn" != "$cur_asn" ] || [ "$new_peer_ip" != "$cur_peer_ip" ]; then
+        info "正在更新 BIRD 配置 ..."
+        sed -i "/^protocol bgp '${IFACE}'/,/^}/c\\
+protocol bgp '${IFACE}' from BGP_peers {\\
+    neighbor ${new_peer_ip}%'${IFACE}' as ${new_asn};\\
+    # bfd on;\\
+}" "$BIRD_CONF"
+        if birdc configure; then
+            info "BIRD 配置已应用"
+        else
+            warn "BIRD 配置应用失败，请手动检查 ${BIRD_CONF}"
+        fi
+    fi
+
+    # ---------- 完成 ----------
+    info "Peer '${name}' 编辑完成"
+    printf '{"status":"success","message":"Peer %s updated successfully"}\n' "$name" >&3
+}
+
+# ============================================================
+# 主入口
+# ============================================================
+case "$SUBCMD" in
+    add)  do_add ;;
+    edit) do_edit ;;
+    *)    die "用法: dn11-peer {add|edit} [--batch] [参数...]" ;;
+esac

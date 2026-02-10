@@ -27,7 +27,7 @@ dn11-panel/
 功能包括：
 
 - 仪表盘：展示路由器和服务器的 BIRD 状态、接口状态、互联链路健康检查
-- BGP Peers：查看路由器和服务器的所有 BGP 邻居状态，支持通过面板添加 Peer
+- BGP Peers：查看路由器和服务器的所有 BGP 邻居状态，支持通过面板添加和编辑 Peer
 - BIRD 路由查询：类似 Looking Glass 功能
 - 系统路由表：查看和搜索路由表
 - 网络工具：Ping / TCPing / Traceroute / NSLookup
@@ -50,6 +50,8 @@ Shell 脚本，部署到 OpenWrt 路由器的 `/www/cgi-bin/dn11-api` 路径。
 | `tcping` | GET | 执行单次 TCPing |
 | `nslookup` | GET | 执行 DNS 查询 |
 | `add_peer` | POST | 添加新的 Peer（需要认证） |
+| `get_peer_detail` | GET | 获取指定 Peer 的详细配置（需要认证） |
+| `edit_peer` | POST | 编辑已有 Peer 的配置（需要认证） |
 
 **部署：**
 
@@ -87,9 +89,16 @@ www-data ALL=(ALL) NOPASSWD: /usr/bin/wg, /usr/bin/birdc, /usr/sbin/ip, /usr/bin
 
 ### dn11-peer — 服务器端添加 Peer 脚本
 
-交互式 Bash 脚本，用于在 Linux 服务器上快速添加 DN11 BGP Peer。支持交互模式和批量模式（`--batch`，供 API 调用）。
+交互式 Bash 脚本，用于在 Linux 服务器上快速添加或编辑 DN11 BGP Peer。
 
-执行流程：获取 Peer 信息 -> 生成 WireGuard 配置 -> 配置防火墙 -> 启动接口 -> 追加 BIRD 邻居配置 -> 应用 BIRD 配置。
+- `dn11-peer add`：添加新 Peer，支持交互模式和批量模式（`--batch`，供 API 调用）
+- `dn11-peer edit --batch [参数...]`：编辑已有 Peer（仅支持批量模式，供 API 调用）
+
+`add` 执行流程：获取 Peer 信息 -> 生成 WireGuard 配置 -> 配置防火墙 -> 启动接口 -> 追加 BIRD 邻居配置 -> 应用 BIRD 配置。
+
+`edit` 执行流程：读取当前配置 -> 停止 WireGuard 接口 -> 更新防火墙端口（如变更） -> 重写配置文件 -> 重新启动接口 -> 更新 BIRD 配置（如 ASN/IP 变更）。
+
+可编辑的字段：`--pubkey`（公钥）、`--peer-ip`（隧道 IP）、`--asn`、`--endpoint`、`--listen-port`（监听端口）、`--mtu`、`--keepalive on|off`（PersistentKeepalive 开关）。
 
 **配置：** 修改脚本顶部的 `PRIVATE_KEY`（WireGuard 私钥）和 `LOCAL_TUNNEL_IP`（本机隧道 IP）。
 
@@ -97,9 +106,11 @@ www-data ALL=(ALL) NOPASSWD: /usr/bin/wg, /usr/bin/birdc, /usr/sbin/ip, /usr/bin
 
 ### dn11-peer-op — 路由器端添加 Peer 脚本（OpenWrt）
 
-与 `dn11-peer` 功能类似，但适配了 OpenWrt 环境。使用 `wg-quick-op` 和 `uci` 管理接口和防火墙。
+与 `dn11-peer` 功能类似，但适配了 OpenWrt 环境。使用 `wg-quick-op` 和 `uci` 管理接口和防火墙。同样支持 `add` 和 `edit` 子命令。
 
-执行流程：获取 Peer 信息 -> 生成 WireGuard 配置 -> 启动接口验证 -> 配置 UCI（network / dhcp / firewall） -> 重启接口 -> 追加 BIRD 邻居配置 -> 应用 BIRD 配置。
+`add` 执行流程：获取 Peer 信息 -> 生成 WireGuard 配置 -> 启动接口验证 -> 配置 UCI（network / dhcp / firewall） -> 重启接口 -> 追加 BIRD 邻居配置 -> 应用 BIRD 配置。
+
+`edit` 执行流程：读取当前配置 -> 停止接口 -> 重写配置文件 -> 启动接口 -> 更新 BIRD 配置（如需要）。
 
 **配置：** 修改脚本顶部的 `PRIVATE_KEY`（WireGuard 私钥）、`LOCAL_TUNNEL_IP`（本机隧道 IP）和 `FW_ZONE_NAME`（防火墙区域名称）。
 

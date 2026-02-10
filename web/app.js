@@ -378,7 +378,10 @@ async function loadPeers() {
                         <div class="card-body">
                             <div class="d-flex justify-content-between align-items-start">
                                 <h5 class="card-title text-primary mb-1">${peer.interface}</h5>
-                                <i class="fa-solid ${icon} fa-lg"></i>
+                                <div>
+                                    <button class="btn btn-sm btn-outline-secondary me-1" onclick="showEditPeerModal('router', '${peer.interface}')" title="编辑"><i class="fa-solid fa-pen-to-square"></i></button>
+                                    <i class="fa-solid ${icon} fa-lg"></i>
+                                </div>
                             </div>
                             <h6 class="card-subtitle mb-3 text-muted">ASN: ${peer.asn}</h6>
                             <ul class="list-unstyled small mb-0">
@@ -427,7 +430,10 @@ async function loadServerPeers() {
                         <div class="card-body">
                             <div class="d-flex justify-content-between align-items-start">
                                 <h5 class="card-title text-primary mb-1">${peer.interface}</h5>
-                                <i class="fa-solid ${icon} fa-lg"></i>
+                                <div>
+                                    <button class="btn btn-sm btn-outline-secondary me-1" onclick="showEditPeerModal('server', '${peer.interface}')" title="编辑"><i class="fa-solid fa-pen-to-square"></i></button>
+                                    <i class="fa-solid ${icon} fa-lg"></i>
+                                </div>
                             </div>
                             <h6 class="card-subtitle mb-3 text-muted">ASN: ${peer.asn}</h6>
                             <ul class="list-unstyled small mb-0">
@@ -1113,4 +1119,133 @@ function showPeerInfo(target) {
 
     document.getElementById('peerInfoContent').innerHTML = html;
     new bootstrap.Modal(document.getElementById('peerInfoModal')).show();
+}
+
+// ============================================================
+// --- 编辑 Peer 功能 ---
+// ============================================================
+
+let editPeerTarget = '';   // 'router' or 'server'
+let editPeerName = '';     // interface name like 'dn11-xxx'
+let editPeerPassword = ''; // cached password for edit submission
+let editPeerOriginal = {}; // original values for reference
+
+function showEditPeerModal(target, interfaceName) {
+    editPeerTarget = target;
+    editPeerName = interfaceName;
+    editPeerPassword = '';
+
+    document.getElementById('editPeerModalTitle').textContent = `编辑 Peer — ${interfaceName}`;
+
+    // Reset modal state
+    document.getElementById('edit-peer-step1').classList.remove('d-none');
+    document.getElementById('edit-peer-step2').classList.add('d-none');
+    document.getElementById('btn-save-peer').classList.add('d-none');
+    document.getElementById('edit-peer-password').value = '';
+    document.getElementById('edit-peer-auth-result').innerHTML = '';
+    document.getElementById('edit-peer-result').innerHTML = '';
+
+    new bootstrap.Modal(document.getElementById('editPeerModal')).show();
+}
+
+async function fetchPeerDetail() {
+    const password = document.getElementById('edit-peer-password').value;
+    if (!password) {
+        document.getElementById('edit-peer-auth-result').innerHTML =
+            '<div class="alert alert-warning mb-0">请输入 API 密码</div>';
+        return;
+    }
+
+    editPeerPassword = password;
+    const resultDiv = document.getElementById('edit-peer-auth-result');
+    resultDiv.innerHTML = '<div class="text-center"><div class="spinner-border spinner-border-sm"></div> 获取中...</div>';
+
+    const name = editPeerName.replace(/^dn11-/, '');
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const params = { name };
+    const token = computeAuthToken(password, timestamp, params);
+
+    const apiBase = API_NODES[editPeerTarget];
+    const url = `${apiBase}?action=get_peer_detail&name=${encodeURIComponent(name)}&timestamp=${timestamp}&token=${token}`;
+
+    try {
+        const res = await fetch(url);
+        const json = await res.json();
+
+        if (json.status !== 'success') {
+            resultDiv.innerHTML = `<div class="alert alert-danger mb-0">${json.message || '获取失败'}</div>`;
+            return;
+        }
+
+        const data = json.data;
+        editPeerOriginal = { ...data };
+
+        document.getElementById('edit-peer-pubkey').value = data.pubkey || '';
+        document.getElementById('edit-peer-ip').value = data.peer_ip || '';
+        document.getElementById('edit-peer-asn').value = data.asn || '';
+        document.getElementById('edit-peer-endpoint').value = data.endpoint || '';
+        document.getElementById('edit-peer-listenport').value = data.listen_port || '';
+        document.getElementById('edit-peer-mtu').value = data.mtu || '1420';
+        document.getElementById('edit-peer-keepalive').value = data.keepalive ? 'on' : 'off';
+
+        // Show step 2
+        document.getElementById('edit-peer-step1').classList.add('d-none');
+        document.getElementById('edit-peer-step2').classList.remove('d-none');
+        document.getElementById('btn-save-peer').classList.remove('d-none');
+
+    } catch (e) {
+        resultDiv.innerHTML = `<div class="alert alert-danger mb-0">请求失败: ${e.message}</div>`;
+    }
+}
+
+async function submitEditPeer() {
+    const name = editPeerName.replace(/^dn11-/, '');
+    const password = editPeerPassword;
+
+    const peer_ip      = document.getElementById('edit-peer-ip').value.trim();
+    const pubkey       = document.getElementById('edit-peer-pubkey').value.trim();
+    const endpoint     = document.getElementById('edit-peer-endpoint').value.trim();
+    const asn          = document.getElementById('edit-peer-asn').value.trim();
+    const listen_port  = document.getElementById('edit-peer-listenport').value.trim();
+    const mtu          = document.getElementById('edit-peer-mtu').value.trim();
+    const keepalive    = document.getElementById('edit-peer-keepalive').value;
+
+    const resultDiv = document.getElementById('edit-peer-result');
+    const btn = document.getElementById('btn-save-peer');
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>保存中...';
+    resultDiv.innerHTML = '';
+
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const params = { name, peer_ip, pubkey, endpoint, asn, listen_port, mtu, keepalive };
+    const token = computeAuthToken(password, timestamp, params);
+
+    const apiBase = API_NODES[editPeerTarget];
+
+    try {
+        const res = await fetch(`${apiBase}?action=edit_peer`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ ...params, timestamp, token })
+        });
+
+        const json = await res.json();
+
+        if (json.status === 'success') {
+            resultDiv.innerHTML = `<div class="alert alert-success mb-0">
+                <i class="fa-solid fa-check-circle me-1"></i>${json.message || 'Peer 编辑成功！'}
+            </div>`;
+            if (editPeerTarget === 'router') loadPeers(); else loadServerPeers();
+        } else {
+            let detail = stripAnsi(json.message || '未知错误');
+            if (json.log) detail += `<pre class="mt-2 mb-0 small bg-dark text-light p-2 rounded" style="max-height:200px;overflow:auto;">${stripAnsi(json.log)}</pre>`;
+            resultDiv.innerHTML = `<div class="alert alert-danger mb-0"><i class="fa-solid fa-circle-xmark me-1"></i>${detail}</div>`;
+        }
+    } catch (e) {
+        resultDiv.innerHTML = `<div class="alert alert-danger mb-0"><i class="fa-solid fa-circle-xmark me-1"></i>请求失败: ${e.message}</div>`;
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-save me-1"></i>保存';
+    }
 }

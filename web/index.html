@@ -382,6 +382,74 @@
 </div>
 
 <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+
+<div class="modal fade" id="editPeerModal" tabindex="-1" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered modal-lg">
+        <div class="modal-content">
+            <div class="modal-header bg-dark text-white">
+                <h5 class="modal-title" id="editPeerModalTitle">编辑 Peer</h5>
+                <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <!-- Step 1: 密码验证 -->
+                <div id="edit-peer-step1">
+                    <div class="mb-3">
+                        <label class="form-label"><i class="fa-solid fa-key me-1"></i>API 密码</label>
+                        <input type="password" class="form-control" id="edit-peer-password" placeholder="输入 API 密码以获取当前配置">
+                    </div>
+                    <button class="btn btn-primary w-100" onclick="fetchPeerDetail()">
+                        <i class="fa-solid fa-download me-1"></i>获取配置
+                    </button>
+                    <div id="edit-peer-auth-result" class="mt-3"></div>
+                </div>
+                <!-- Step 2: 编辑表单 -->
+                <div id="edit-peer-step2" class="d-none">
+                    <div class="row g-3">
+                        <div class="col-12">
+                            <label class="form-label">对端公钥</label>
+                            <input type="text" class="form-control font-monospace" id="edit-peer-pubkey" placeholder="WireGuard Public Key">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">对端隧道 IP</label>
+                            <input type="text" class="form-control" id="edit-peer-ip" placeholder="172.16.x.x">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">ASN</label>
+                            <input type="text" class="form-control" id="edit-peer-asn" placeholder="如 4211110001">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">Endpoint</label>
+                            <input type="text" class="form-control" id="edit-peer-endpoint" placeholder="host:port (留空保持不变)">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">ListenPort</label>
+                            <input type="number" class="form-control" id="edit-peer-listenport" placeholder="如 30001">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">MTU</label>
+                            <input type="number" class="form-control" id="edit-peer-mtu" placeholder="如 1420">
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label">PersistentKeepalive</label>
+                            <select class="form-select" id="edit-peer-keepalive">
+                                <option value="on">开启 (16s)</option>
+                                <option value="off">关闭</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div id="edit-peer-result" class="mt-3"></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary d-none" id="btn-save-peer" onclick="submitEditPeer()">
+                    <i class="fa-solid fa-save me-1"></i>保存
+                </button>
+            </div>
+        </div>
+    </div>
+</div>
+
 <script src="app.js"></script>
 </body>
 </html>

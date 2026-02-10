@@ -508,7 +508,7 @@ check_cloud_connection() {
 # ============================================
 
 verify_auth() {
-    local name="$1" peer_ip="$2" pubkey="$3" endpoint="$4" asn="$5" timestamp="$6" token="$7"
+    local param_str="$1" timestamp="$2" token="$3"
 
     [ -z "$timestamp" ] && { json_response '{"status":"error","message":"Missing timestamp"}'; exit 0; }
     [ -z "$token" ] && { json_response '{"status":"error","message":"Missing auth token"}'; exit 0; }
@@ -520,7 +520,6 @@ verify_auth() {
     [ "$diff" -gt 300 ] && { json_response '{"status":"error","message":"Auth token expired"}'; exit 0; }
 
     # Compute expected token: sha256(secret + timestamp + sorted_params)
-    param_str="asn=${asn}&endpoint=${endpoint}&name=${name}&peer_ip=${peer_ip}&pubkey=${pubkey}"
     expected=$(printf '%s' "${API_SECRET}${timestamp}${param_str}" | sha256sum | awk '{print $1}')
 
     [ "$token" != "$expected" ] && { json_response '{"status":"error","message":"Invalid auth token"}'; exit 0; }
@@ -549,7 +548,7 @@ add_peer() {
     p_token=$(echo "$POST_DATA" | sed -n 's/.*"token" *: *"\([^"]*\)".*/\1/p')
 
     # Verify authentication
-    verify_auth "$p_name" "$p_peer_ip" "$p_pubkey" "$p_endpoint" "$p_asn" "$p_timestamp" "$p_token"
+    verify_auth "asn=${p_asn}&endpoint=${p_endpoint}&name=${p_name}&peer_ip=${p_peer_ip}&pubkey=${p_pubkey}" "$p_timestamp" "$p_token"
 
     # Validate inputs
     echo "$p_name" | grep -qE '^[a-z0-9]{1,6}$' || { json_response '{"status":"error","message":"Invalid peer name"}'; exit 0; }
@@ -558,8 +557,8 @@ add_peer() {
     [ -z "$p_asn" ] && { json_response '{"status":"error","message":"ASN required"}'; exit 0; }
     [ -z "$p_endpoint" ] && { json_response '{"status":"error","message":"Endpoint required (router is behind NAT)"}'; exit 0; }
 
-    # Call dn11-peer-op in batch mode
-    result=$(dn11-peer-op --batch \
+    # Call dn11-peer-op add in batch mode
+    result=$(dn11-peer-op add --batch \
         --name "$p_name" \
         --peer-ip "$p_peer_ip" \
         --pubkey "$p_pubkey" \
@@ -570,6 +569,101 @@ add_peer() {
         json_response "$result"
     else
         log=$(tail -20 /tmp/dn11-add-peer-last.log 2>/dev/null)
+        log_escaped=$(json_escape "$log")
+        json_response "{\"status\":\"error\",\"message\":\"Script produced no output\",\"log\":\"$log_escaped\"}"
+    fi
+}
+
+# ============================================
+# Get Peer Detail (authenticated)
+# ============================================
+
+get_peer_detail() {
+    query="$QUERY_STRING"
+    p_name=$(echo "$query" | sed -n 's/.*name=\([^&]*\).*/\1/p')
+    p_timestamp=$(echo "$query" | sed -n 's/.*timestamp=\([^&]*\).*/\1/p')
+    p_token=$(echo "$query" | sed -n 's/.*token=\([^&]*\).*/\1/p')
+
+    echo "$p_name" | grep -qE '^[a-z0-9]{1,6}$' || { json_response '{"status":"error","message":"Invalid peer name"}'; exit 0; }
+
+    verify_auth "name=${p_name}" "$p_timestamp" "$p_token"
+
+    IFACE="dn11-${p_name}"
+    WG_CONF="${WIREGUARD_DIR}/${IFACE}.conf"
+
+    [ -f "$WG_CONF" ] || { json_response '{"status":"error","message":"Peer not found"}'; exit 0; }
+
+    # Read WG config
+    pubkey=$(grep -i '^PublicKey' "$WG_CONF" | awk '{print $NF}')
+    endpoint_val=$(grep -i '^Endpoint' "$WG_CONF" | awk '{print $NF}')
+    listen_port=$(grep -i 'ListenPort' "$WG_CONF" | sed 's/^[# ]*//' | awk -F'=' '{print $2}' | tr -d ' ')
+    mtu_val=$(grep -i '^MTU' "$WG_CONF" | awk '{print $NF}')
+    keepalive_val=$(grep -i '^PersistentKeepalive' "$WG_CONF" | awk '{print $NF}')
+    peer_ip_val=$(grep 'PostUp.*ip addr add' "$WG_CONF" | sed -n 's/.*peer \([0-9.]*\).*/\1/p')
+
+    # Read ASN from BIRD config
+    asn_val=""
+    peer_block=$(grep -A 5 "protocol bgp '${IFACE}'" "$BIRD_CONFIG" 2>/dev/null)
+    if [ -n "$peer_block" ]; then
+        asn_val=$(echo "$peer_block" | grep ' as ' | awk '{print $NF}' | tr -d ';')
+    fi
+
+    # keepalive
+    ka_json="false"
+    if [ -n "$keepalive_val" ] && [ "$keepalive_val" -gt 0 ] 2>/dev/null; then
+        ka_json="true"
+    fi
+
+    pubkey_escaped=$(json_escape "$pubkey")
+    endpoint_escaped=$(json_escape "$endpoint_val")
+
+    json="{\"status\":\"success\",\"data\":{\"name\":\"${p_name}\",\"pubkey\":\"${pubkey_escaped}\",\"peer_ip\":\"${peer_ip_val}\",\"endpoint\":\"${endpoint_escaped}\",\"asn\":\"${asn_val}\",\"listen_port\":\"${listen_port}\",\"mtu\":\"${mtu_val}\",\"keepalive\":${ka_json}}}"
+    json_response "$json"
+}
+
+# ============================================
+# Edit Peer (authenticated)
+# ============================================
+
+edit_peer() {
+    # Read POST body
+    POST_DATA=""
+    if [ -n "$CONTENT_LENGTH" ] && [ "$CONTENT_LENGTH" -gt 0 ] 2>/dev/null; then
+        POST_DATA=$(dd bs=1 count="$CONTENT_LENGTH" 2>/dev/null)
+    fi
+    [ -z "$POST_DATA" ] && { json_response '{"status":"error","message":"No POST data"}'; exit 0; }
+
+    p_name=$(echo "$POST_DATA" | sed -n 's/.*"name" *: *"\([^"]*\)".*/\1/p')
+    p_peer_ip=$(echo "$POST_DATA" | sed -n 's/.*"peer_ip" *: *"\([^"]*\)".*/\1/p')
+    p_pubkey=$(echo "$POST_DATA" | sed -n 's/.*"pubkey" *: *"\([^"]*\)".*/\1/p')
+    p_endpoint=$(echo "$POST_DATA" | sed -n 's/.*"endpoint" *: *"\([^"]*\)".*/\1/p')
+    p_asn=$(echo "$POST_DATA" | sed -n 's/.*"asn" *: *"\([^"]*\)".*/\1/p')
+    p_listen_port=$(echo "$POST_DATA" | sed -n 's/.*"listen_port" *: *"\([^"]*\)".*/\1/p')
+    p_mtu=$(echo "$POST_DATA" | sed -n 's/.*"mtu" *: *"\([^"]*\)".*/\1/p')
+    p_keepalive=$(echo "$POST_DATA" | sed -n 's/.*"keepalive" *: *"\([^"]*\)".*/\1/p')
+    p_timestamp=$(echo "$POST_DATA" | sed -n 's/.*"timestamp" *: *"\([^"]*\)".*/\1/p')
+    p_token=$(echo "$POST_DATA" | sed -n 's/.*"token" *: *"\([^"]*\)".*/\1/p')
+
+    echo "$p_name" | grep -qE '^[a-z0-9]{1,6}$' || { json_response '{"status":"error","message":"Invalid peer name"}'; exit 0; }
+
+    verify_auth "asn=${p_asn}&endpoint=${p_endpoint}&keepalive=${p_keepalive}&listen_port=${p_listen_port}&mtu=${p_mtu}&name=${p_name}&peer_ip=${p_peer_ip}&pubkey=${p_pubkey}" "$p_timestamp" "$p_token"
+
+    # Build command
+    cmd="dn11-peer-op edit --batch --name $p_name"
+    [ -n "$p_peer_ip" ] && cmd="$cmd --peer-ip $p_peer_ip"
+    [ -n "$p_pubkey" ] && cmd="$cmd --pubkey $p_pubkey"
+    [ -n "$p_endpoint" ] && cmd="$cmd --endpoint $p_endpoint"
+    [ -n "$p_asn" ] && cmd="$cmd --asn $p_asn"
+    [ -n "$p_listen_port" ] && cmd="$cmd --listen-port $p_listen_port"
+    [ -n "$p_mtu" ] && cmd="$cmd --mtu $p_mtu"
+    [ -n "$p_keepalive" ] && cmd="$cmd --keepalive $p_keepalive"
+
+    result=$($cmd 2>/tmp/dn11-edit-peer-last.log)
+
+    if [ -n "$result" ]; then
+        json_response "$result"
+    else
+        log=$(tail -20 /tmp/dn11-edit-peer-last.log 2>/dev/null)
         log_escaped=$(json_escape "$log")
         json_response "{\"status\":\"error\",\"message\":\"Script produced no output\",\"log\":\"$log_escaped\"}"
     fi
@@ -608,8 +702,14 @@ case "$action" in
     "add_peer")
         add_peer
         ;;
+    "get_peer_detail")
+        get_peer_detail
+        ;;
+    "edit_peer")
+        edit_peer
+        ;;
     *)
-        json="{\"status\":\"error\",\"message\":\"Invalid action. Valid actions: get_peers, get_routes, check_cloud, bird_show, ping, tcping, nslookup\"}"
+        json="{\"status\":\"error\",\"message\":\"Invalid action. Valid actions: get_peers, get_routes, check_cloud, bird_show, ping, tcping, nslookup, add_peer, get_peer_detail, edit_peer\"}"
         json_response "$json"
         ;;
 esac

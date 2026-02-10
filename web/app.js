@@ -760,7 +760,7 @@ function parseTraceLine(line, tbody) {
     
     let host = 'Unknown / Timeout';
     // Try to get hostname before the IP parens
-    const parts = line.split(/\s+/);
+    const parts = line.trimStart().split(/\s+/);
     if(parts.length > 2 && parts[2].startsWith('(')) {
         host = parts[1];
     } else if (ip !== '*') {

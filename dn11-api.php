@@ -568,7 +568,7 @@ function get_peer_detail() {
 
     if (preg_match('/^PublicKey\s*=\s*(.+)$/m', $conf_content, $m)) $pubkey = trim($m[1]);
     if (preg_match('/^Endpoint\s*=\s*(.+)$/m', $conf_content, $m)) $endpoint = trim($m[1]);
-    if (preg_match('/^ListenPort\s*=\s*(.+)$/m', $conf_content, $m)) $listen_port = trim($m[1]);
+    if (preg_match('/^[#\s]*ListenPort\s*=\s*(.+)$/m', $conf_content, $m)) $listen_port = trim($m[1]);
     if (preg_match('/^MTU\s*=\s*(.+)$/m', $conf_content, $m)) $mtu = trim($m[1]);
     if (preg_match('/^PersistentKeepalive\s*=\s*(\d+)/m', $conf_content, $m)) $keepalive = intval($m[1]) > 0;
     if (preg_match('/PostUp.*peer\s+([\d.]+)/', $conf_content, $m)) $peer_ip = $m[1];
@@ -653,6 +653,41 @@ function edit_peer() {
 }
 
 // ============================================
+// Delete Peer (authenticated)
+// ============================================
+
+function delete_peer() {
+    $input = json_decode(file_get_contents('php://input'), true);
+    if (!$input) {
+        die(json_encode(['status' => 'error', 'message' => 'Invalid JSON input']));
+    }
+
+    $name      = $input['name'] ?? '';
+    $timestamp = $input['timestamp'] ?? '';
+    $token     = $input['token'] ?? '';
+
+    // Verify auth
+    verify_auth(['name' => $name], $timestamp, $token);
+
+    if (!preg_match('/^[a-z0-9]{1,6}$/', $name)) {
+        die(json_encode(['status' => 'error', 'message' => 'Invalid peer name']));
+    }
+
+    // Build command
+    $cmd = sprintf('dn11-peer delete --batch --name %s', escapeshellarg($name));
+
+    $log_file = '/tmp/dn11-delete-peer-' . time() . '.log';
+    $result = shell_exec("sudo $cmd 2>" . escapeshellarg($log_file));
+
+    if (!empty(trim($result ?? ''))) {
+        echo $result;
+    } else {
+        $log = @file_get_contents($log_file) ?: 'No log available';
+        echo json_encode(['status' => 'error', 'message' => 'Script produced no output', 'log' => $log]);
+    }
+}
+
+// ============================================
 // Main Dispatcher
 // ============================================
 
@@ -695,11 +730,14 @@ switch ($action) {
     case 'edit_peer':
         edit_peer();
         break;
+    case 'delete_peer':
+        delete_peer();
+        break;
     default:
         echo json_encode([
             'status' => 'error', 
             'message' => 'Invalid action',
-            'valid_actions' => ['get_peers', 'get_routes', 'check_router', 'bird_show', 'ping', 'tcping', 'nslookup', 'traceroute', 'ospf_state', 'add_peer', 'get_peer_detail', 'edit_peer']
+            'valid_actions' => ['get_peers', 'get_routes', 'check_router', 'bird_show', 'ping', 'tcping', 'nslookup', 'traceroute', 'ospf_state', 'add_peer', 'get_peer_detail', 'edit_peer', 'delete_peer']
         ]);
         break;
 }

@@ -125,7 +125,7 @@ info "分配监听端口: ${listen_port}/udp（将不会生效）"
     printf '# ListenPort = %s\n' "$listen_port"
     printf 'PostUp = /sbin/ip addr add dev %%i %s/32 peer %s/32\n' "$LOCAL_TUNNEL_IP" "$peer_ip"
     printf 'Table = off\n'
-    printf 'MTU = 1420\n'
+    printf 'MTU = 1388\n'
     printf '\n'
     printf '[Peer]\n'
     printf 'Endpoint = %s\n' "$endpoint"
@@ -332,10 +332,74 @@ protocol bgp '${IFACE}' from BGP_peers {\\
 }
 
 # ============================================================
+# do_delete: 删除已有 peer（仅支持 --batch 模式）
+# ============================================================
+do_delete() {
+    [ "$BATCH_MODE" != 1 ] && die "delete 仅支持 --batch 模式"
+    [ -z "$name" ] && die "peer 名称不能为空"
+
+    IFACE="dn11-${name}"
+    UCI_IFACE="wg_dn11_${name}"
+    WG_CONF="/etc/wireguard/${IFACE}.conf"
+    BIRD_CONF="/etc/bird/ebgp_peers.conf"
+
+    [ -f "$WG_CONF" ] || die "配置文件 ${WG_CONF} 不存在，peer '${name}' 未找到"
+
+    info "正在删除 peer '${name}' ..."
+
+    # ---------- 停止 WireGuard 接口 ----------
+    info "正在停止接口 ${IFACE} ..."
+    wg-quick-op down "$IFACE" 2>/dev/null || warn "接口关闭失败，尝试继续"
+    info "接口 ${IFACE} 已停止"
+
+    # ---------- 清理 UCI 配置 ----------
+    info "正在清理 UCI 配置 ..."
+
+    # 删除 network 接口
+    uci delete "network.${UCI_IFACE}" 2>/dev/null || true
+    info "已删除 network 接口 ${UCI_IFACE}"
+
+    # 删除 dhcp 配置
+    uci delete "dhcp.${UCI_IFACE}" 2>/dev/null || true
+    info "已删除 ${UCI_IFACE} 的 DHCP 配置"
+
+    # 从防火墙区域移除接口
+    uci del_list "firewall.${FW_ZONE_NAME}.network=${UCI_IFACE}" 2>/dev/null || true
+    info "已从防火墙 ${FW_ZONE_NAME} 区域移除 ${UCI_IFACE}"
+
+    # 提交所有 uci 变更
+    uci commit network
+    uci commit dhcp
+    uci commit firewall
+    info "UCI 配置已提交"
+
+    # ---------- 删除 BIRD 配置 ----------
+    if grep -q "protocol bgp '${IFACE}'" "$BIRD_CONF" 2>/dev/null; then
+        info "正在删除 BIRD 邻居配置 ..."
+        sed -i "/^protocol bgp '${IFACE}'/,/^}/d" "$BIRD_CONF"
+        sed -i '/^$/N;/^\n$/d' "$BIRD_CONF"
+        if birdc configure; then
+            info "BIRD 配置已应用"
+        else
+            warn "BIRD 配置应用失败，请手动检查 ${BIRD_CONF}"
+        fi
+    fi
+
+    # ---------- 删除 WireGuard 配置文件 ----------
+    rm -f "$WG_CONF"
+    info "已删除 ${WG_CONF}"
+
+    # ---------- 完成 ----------
+    info "Peer '${name}' 已删除"
+    printf '{"status":"success","message":"Peer %s deleted successfully"}\n' "$name" >&3
+}
+
+# ============================================================
 # 主入口
 # ============================================================
 case "$SUBCMD" in
-    add)  do_add ;;
-    edit) do_edit ;;
-    *)    die "用法: dn11-peer-op {add|edit} [--batch] [参数...]" ;;
+    add)    do_add ;;
+    edit)   do_edit ;;
+    delete) do_delete ;;
+    *)      die "用法: dn11-peer-op {add|edit|delete} [--batch] [参数...]" ;;
 esac

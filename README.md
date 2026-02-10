@@ -52,6 +52,7 @@ Shell 脚本，部署到 OpenWrt 路由器的 `/www/cgi-bin/dn11-api` 路径。
 | `add_peer` | POST | 添加新的 Peer（需要认证） |
 | `get_peer_detail` | GET | 获取指定 Peer 的详细配置（需要认证） |
 | `edit_peer` | POST | 编辑已有 Peer 的配置（需要认证） |
+| `delete_peer` | POST | 删除已有 Peer（需要认证） |
 
 **部署：**
 
@@ -93,10 +94,13 @@ www-data ALL=(ALL) NOPASSWD: /usr/bin/wg, /usr/bin/birdc, /usr/sbin/ip, /usr/bin
 
 - `dn11-peer add`：添加新 Peer，支持交互模式和批量模式（`--batch`，供 API 调用）
 - `dn11-peer edit --batch [参数...]`：编辑已有 Peer（仅支持批量模式，供 API 调用）
+- `dn11-peer delete --batch --name <name>`：删除已有 Peer（仅支持批量模式，供 API 调用）
 
 `add` 执行流程：获取 Peer 信息 -> 生成 WireGuard 配置 -> 配置防火墙 -> 启动接口 -> 追加 BIRD 邻居配置 -> 应用 BIRD 配置。
 
 `edit` 执行流程：读取当前配置 -> 停止 WireGuard 接口 -> 更新防火墙端口（如变更） -> 重写配置文件 -> 重新启动接口 -> 更新 BIRD 配置（如 ASN/IP 变更）。
+
+`delete` 执行流程：停止并禁用 WireGuard 接口 -> 清理防火墙规则 -> 删除 BIRD 邻居配置 -> 应用 BIRD 配置 -> 删除 WireGuard 配置文件。
 
 可编辑的字段：`--pubkey`（公钥）、`--peer-ip`（隧道 IP）、`--asn`、`--endpoint`、`--listen-port`（监听端口）、`--mtu`、`--keepalive on|off`（PersistentKeepalive 开关）。
 

@@ -375,13 +375,10 @@ async function loadPeers() {
             const card = `
                 <div class="col-md-4 mb-4">
                     <div class="card shadow-sm peer-card ${cardClass} h-100">
-                        <div class="card-body">
+                        <div class="card-body d-flex flex-column">
                             <div class="d-flex justify-content-between align-items-start">
                                 <h5 class="card-title text-primary mb-1">${peer.interface}</h5>
-                                <div>
-                                    <button class="btn btn-sm btn-outline-secondary me-1" onclick="showEditPeerModal('router', '${peer.interface}')" title="编辑"><i class="fa-solid fa-pen-to-square"></i></button>
-                                    <i class="fa-solid ${icon} fa-lg"></i>
-                                </div>
+                                <i class="fa-solid ${icon} fa-lg"></i>
                             </div>
                             <h6 class="card-subtitle mb-3 text-muted">ASN: ${peer.asn}</h6>
                             <ul class="list-unstyled small mb-0">
@@ -390,6 +387,10 @@ async function loadPeers() {
                                 <li class="mt-2 text-secondary"><i class="fa-solid fa-network-wired"></i> ${peer.tunnel_ip}</li>
                             </ul>
                             ${errorBtn}
+                            <div class="mt-auto d-flex justify-content-end gap-1 pt-2">
+                                <button class="btn btn-sm btn-outline-secondary" onclick="showEditPeerModal('router', '${peer.interface}')" title="编辑"><i class="fa-solid fa-pen-to-square"></i></button>
+                                <button class="btn btn-sm btn-outline-secondary" onclick="showDeletePeerModal('router', '${peer.interface}')" title="删除"><i class="fa-solid fa-trash"></i></button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -427,13 +428,10 @@ async function loadServerPeers() {
             const card = `
                 <div class="col-md-4 mb-4">
                     <div class="card shadow-sm peer-card ${cardClass} h-100">
-                        <div class="card-body">
+                        <div class="card-body d-flex flex-column">
                             <div class="d-flex justify-content-between align-items-start">
                                 <h5 class="card-title text-primary mb-1">${peer.interface}</h5>
-                                <div>
-                                    <button class="btn btn-sm btn-outline-secondary me-1" onclick="showEditPeerModal('server', '${peer.interface}')" title="编辑"><i class="fa-solid fa-pen-to-square"></i></button>
-                                    <i class="fa-solid ${icon} fa-lg"></i>
-                                </div>
+                                <i class="fa-solid ${icon} fa-lg"></i>
                             </div>
                             <h6 class="card-subtitle mb-3 text-muted">ASN: ${peer.asn}</h6>
                             <ul class="list-unstyled small mb-0">
@@ -442,6 +440,10 @@ async function loadServerPeers() {
                                 <li class="mt-2 text-secondary"><i class="fa-solid fa-network-wired"></i> ${peer.tunnel_ip}</li>
                             </ul>
                             ${errorBtn}
+                            <div class="mt-auto d-flex justify-content-end gap-1 pt-2">
+                                <button class="btn btn-sm btn-outline-secondary" onclick="showEditPeerModal('server', '${peer.interface}')" title="编辑"><i class="fa-solid fa-pen-to-square"></i></button>
+                                <button class="btn btn-sm btn-outline-secondary" onclick="showDeletePeerModal('server', '${peer.interface}')" title="删除"><i class="fa-solid fa-trash"></i></button>
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1247,5 +1249,80 @@ async function submitEditPeer() {
     } finally {
         btn.disabled = false;
         btn.innerHTML = '<i class="fa-solid fa-save me-1"></i>保存';
+    }
+}
+
+// ============================================================
+// --- 删除 Peer 功能 ---
+// ============================================================
+
+let deletePeerTarget = '';   // 'router' or 'server'
+let deletePeerName = '';     // interface name like 'dn11-xxx'
+
+function showDeletePeerModal(target, interfaceName) {
+    deletePeerTarget = target;
+    deletePeerName = interfaceName;
+
+    document.getElementById('deletePeerModalTitle').textContent = `删除 Peer — ${interfaceName}`;
+    document.getElementById('delete-peer-display-name').textContent = interfaceName;
+    document.getElementById('delete-peer-password').value = '';
+    document.getElementById('delete-peer-result').innerHTML = '';
+    document.getElementById('btn-delete-peer').disabled = false;
+    document.getElementById('btn-delete-peer').innerHTML = '<i class="fa-solid fa-trash me-1"></i>确认删除';
+
+    new bootstrap.Modal(document.getElementById('deletePeerModal')).show();
+}
+
+async function submitDeletePeer() {
+    const password = document.getElementById('delete-peer-password').value;
+    const resultDiv = document.getElementById('delete-peer-result');
+    const btn = document.getElementById('btn-delete-peer');
+
+    if (!password) {
+        resultDiv.innerHTML = '<div class="alert alert-warning mb-0">请输入 API 密码</div>';
+        return;
+    }
+
+    const name = deletePeerName.replace(/^dn11-/, '');
+    const timestamp = Math.floor(Date.now() / 1000).toString();
+    const params = { name };
+    const token = computeAuthToken(password, timestamp, params);
+
+    btn.disabled = true;
+    btn.innerHTML = '<span class="spinner-border spinner-border-sm me-1"></span>删除中...';
+    resultDiv.innerHTML = '';
+
+    const apiBase = API_NODES[deletePeerTarget];
+
+    try {
+        const res = await fetch(`${apiBase}?action=delete_peer`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ name, timestamp, token })
+        });
+
+        const json = await res.json();
+
+        if (json.status === 'success') {
+            resultDiv.innerHTML = `<div class="alert alert-success mb-0">
+                <i class="fa-solid fa-check-circle me-1"></i>${json.message || 'Peer 删除成功！'}
+            </div>`;
+            // Refresh peer list after success
+            if (deletePeerTarget === 'router') loadPeers(); else loadServerPeers();
+            // Auto-close modal after 1.5s
+            setTimeout(() => {
+                const modal = bootstrap.Modal.getInstance(document.getElementById('deletePeerModal'));
+                if (modal) modal.hide();
+            }, 1500);
+        } else {
+            let detail = stripAnsi(json.message || '未知错误');
+            if (json.log) detail += `<pre class="mt-2 mb-0 small bg-dark text-light p-2 rounded" style="max-height:200px;overflow:auto;">${stripAnsi(json.log)}</pre>`;
+            resultDiv.innerHTML = `<div class="alert alert-danger mb-0"><i class="fa-solid fa-circle-xmark me-1"></i>${detail}</div>`;
+        }
+    } catch (e) {
+        resultDiv.innerHTML = `<div class="alert alert-danger mb-0"><i class="fa-solid fa-circle-xmark me-1"></i>请求失败: ${e.message}</div>`;
+    } finally {
+        btn.disabled = false;
+        btn.innerHTML = '<i class="fa-solid fa-trash me-1"></i>确认删除';
     }
 }

@@ -670,6 +670,41 @@ edit_peer() {
 }
 
 # ============================================
+# Delete Peer (authenticated)
+# ============================================
+
+delete_peer() {
+    # Read POST body
+    POST_DATA=""
+    if [ -n "$CONTENT_LENGTH" ] && [ "$CONTENT_LENGTH" -gt 0 ] 2>/dev/null; then
+        POST_DATA=$(dd bs=1 count="$CONTENT_LENGTH" 2>/dev/null)
+    fi
+
+    [ -z "$POST_DATA" ] && { json_response '{"status":"error","message":"No POST data"}'; exit 0; }
+
+    # Parse JSON parameters
+    p_name=$(echo "$POST_DATA" | sed -n 's/.*"name" *: *"\([^"]*\)".*/\1/p')
+    p_timestamp=$(echo "$POST_DATA" | sed -n 's/.*"timestamp" *: *"\([^"]*\)".*/\1/p')
+    p_token=$(echo "$POST_DATA" | sed -n 's/.*"token" *: *"\([^"]*\)".*/\1/p')
+
+    echo "$p_name" | grep -qE '^[a-z0-9]{1,6}$' || { json_response '{"status":"error","message":"Invalid peer name"}'; exit 0; }
+
+    # Verify authentication
+    verify_auth "name=${p_name}" "$p_timestamp" "$p_token"
+
+    # Call dn11-peer-op delete in batch mode
+    result=$(dn11-peer-op delete --batch --name "$p_name" 2>/tmp/dn11-delete-peer-last.log)
+
+    if [ -n "$result" ]; then
+        json_response "$result"
+    else
+        log=$(tail -20 /tmp/dn11-delete-peer-last.log 2>/dev/null)
+        log_escaped=$(json_escape "$log")
+        json_response "{\"status\":\"error\",\"message\":\"Script produced no output\",\"log\":\"$log_escaped\"}"
+    fi
+}
+
+# ============================================
 # Main Router
 # ============================================
 
@@ -708,8 +743,11 @@ case "$action" in
     "edit_peer")
         edit_peer
         ;;
+    "delete_peer")
+        delete_peer
+        ;;
     *)
-        json="{\"status\":\"error\",\"message\":\"Invalid action. Valid actions: get_peers, get_routes, check_cloud, bird_show, ping, tcping, nslookup, add_peer, get_peer_detail, edit_peer\"}"
+        json="{\"status\":\"error\",\"message\":\"Invalid action. Valid actions: get_peers, get_routes, check_cloud, bird_show, ping, tcping, nslookup, add_peer, get_peer_detail, edit_peer, delete_peer\"}"
         json_response "$json"
         ;;
 esac

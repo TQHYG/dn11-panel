@@ -233,7 +233,7 @@ do_edit() {
     [ -f "$WG_CONF" ] || die "配置文件 ${WG_CONF} 不存在，peer '${name}' 未找到"
 
     # ---------- 读取当前配置 ----------
-    cur_listen_port=$(grep -i '^ListenPort' "$WG_CONF" | awk '{print $NF}')
+    cur_listen_port=$(grep -i 'ListenPort' "$WG_CONF" | sed 's/^[# ]*//' | awk -F'=' '{print $2}' | tr -d ' ')
     cur_mtu=$(grep -i '^MTU' "$WG_CONF" | awk '{print $NF}')
     cur_pubkey=$(grep -i '^PublicKey' "$WG_CONF" | awk '{print $NF}')
     cur_endpoint=$(grep -i '^Endpoint' "$WG_CONF" | awk '{print $NF}')
@@ -327,10 +327,66 @@ protocol bgp '${IFACE}' from BGP_peers {\\
 }
 
 # ============================================================
+# do_delete: 删除已有 peer（仅支持 --batch 模式）
+# ============================================================
+do_delete() {
+    [ "$BATCH_MODE" != 1 ] && die "delete 仅支持 --batch 模式"
+    [ -z "$name" ] && die "peer 名称不能为空"
+
+    IFACE="dn11-${name}"
+    WG_CONF="/etc/wireguard/${IFACE}.conf"
+    BIRD_CONF="/etc/bird/ebgp_peers.conf"
+
+    [ -f "$WG_CONF" ] || die "配置文件 ${WG_CONF} 不存在，peer '${name}' 未找到"
+
+    info "正在删除 peer '${name}' ..."
+
+    # ---------- 读取当前监听端口（用于清理防火墙） ----------
+    cur_listen_port=$(grep -i 'ListenPort' "$WG_CONF" | sed 's/^[# ]*//' | awk -F'=' '{print $2}' | tr -d ' ')
+
+    # ---------- 停止并禁用 WireGuard 接口 ----------
+    info "正在停止接口 ${IFACE} ..."
+    wg-quick down "$IFACE" 2>/dev/null || warn "接口关闭失败，尝试继续"
+    systemctl disable wg-quick@"$IFACE" 2>/dev/null || true
+    info "接口 ${IFACE} 已停止并禁用"
+
+    # ---------- 清理防火墙 ----------
+    if [ -n "$cur_listen_port" ]; then
+        info "正在清理防火墙端口 ${cur_listen_port}/udp ..."
+        firewall-cmd --permanent --service=dn11 --remove-port="${cur_listen_port}/udp" 2>/dev/null || true
+    fi
+    firewall-cmd --permanent --zone=trusted --remove-interface="$IFACE" 2>/dev/null || true
+    firewall-cmd --reload || warn "防火墙重载失败"
+    info "防火墙配置已清理"
+
+    # ---------- 删除 BIRD 配置 ----------
+    if grep -q "protocol bgp '${IFACE}'" "$BIRD_CONF" 2>/dev/null; then
+        info "正在删除 BIRD 邻居配置 ..."
+        sed -i "/^protocol bgp '${IFACE}'/,/^}/d" "$BIRD_CONF"
+        # 清理可能残留的空行
+        sed -i '/^$/N;/^\n$/d' "$BIRD_CONF"
+        if birdc configure; then
+            info "BIRD 配置已应用"
+        else
+            warn "BIRD 配置应用失败，请手动检查 ${BIRD_CONF}"
+        fi
+    fi
+
+    # ---------- 删除 WireGuard 配置文件 ----------
+    rm -f "$WG_CONF"
+    info "已删除 ${WG_CONF}"
+
+    # ---------- 完成 ----------
+    info "Peer '${name}' 已删除"
+    printf '{"status":"success","message":"Peer %s deleted successfully"}\n' "$name" >&3
+}
+
+# ============================================================
 # 主入口
 # ============================================================
 case "$SUBCMD" in
-    add)  do_add ;;
-    edit) do_edit ;;
-    *)    die "用法: dn11-peer {add|edit} [--batch] [参数...]" ;;
+    add)    do_add ;;
+    edit)   do_edit ;;
+    delete) do_delete ;;
+    *)      die "用法: dn11-peer {add|edit|delete} [--batch] [参数...]" ;;
 esac

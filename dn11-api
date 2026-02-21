@@ -596,7 +596,7 @@ get_peer_detail() {
     # Read WG config
     pubkey=$(grep -i '^PublicKey' "$WG_CONF" | awk '{print $NF}')
     endpoint_val=$(grep -i '^Endpoint' "$WG_CONF" | awk '{print $NF}')
-    listen_port=$(grep -i 'ListenPort' "$WG_CONF" | sed 's/^[# ]*//' | awk -F'=' '{print $2}' | tr -d ' ')
+    listen_port=$(grep -i 'ListenPort' "$WG_CONF" | awk -F'=' '/^[[:space:]]*#/ {print "-1"; exit} {gsub(/[[:space:]]/, "", $2); print $2}')
     mtu_val=$(grep -i '^MTU' "$WG_CONF" | awk '{print $NF}')
     keepalive_val=$(grep -i '^PersistentKeepalive' "$WG_CONF" | awk '{print $NF}')
     peer_ip_val=$(grep 'PostUp.*ip addr add' "$WG_CONF" | sed -n 's/.*peer \([0-9.]*\).*/\1/p')

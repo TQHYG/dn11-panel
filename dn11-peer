@@ -281,7 +281,11 @@ do_edit() {
     {
         printf '[Interface]\n'
         printf 'PrivateKey = %s\n' "$PRIVATE_KEY"
-        printf 'ListenPort = %s\n' "$new_listen_port"
+        if [ "$new_listen_port" = "-1" ]; then
+            printf '# ListenPort 禁用\n'
+        else
+            printf 'ListenPort = %s\n' "$new_listen_port"
+        fi
         printf 'PostUp = /sbin/ip addr add dev %%i %s/32 peer %s/32\n' "$LOCAL_TUNNEL_IP" "$new_peer_ip"
         printf 'Table = off\n'
         printf 'MTU = %s\n' "${new_mtu}"

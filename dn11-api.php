@@ -242,6 +242,14 @@ function get_peers_status() {
             $asn = $asn_matches[1];
         }
 
+        // 提取监听端口
+        $listen_port = "-1";
+        if (preg_match('/^#\s*ListenPort\s*=\s*\d+/m', $conf_content)) {
+            $listen_port = "-1";
+        } elseif (preg_match('/^ListenPort\s*=\s*(\d+)/m', $conf_content, $m)) {
+            $listen_port = $m[1];
+        }
+
         // WireGuard 状态检查
         $wg_check = safe_exec("wg show " . escapeshellarg($interface) . " latest-handshakes");
         $wg_status = "down";
@@ -304,6 +312,7 @@ function get_peers_status() {
             'interface' => $interface,
             'asn' => $asn,
             'tunnel_ip' => $tunnel_ip,
+            'listen_port' => $listen_port,
             'wg_status' => $wg_status,
             'bird_status' => $bird_status,
             'overall_status' => $overall
@@ -663,7 +672,11 @@ function get_peer_detail() {
 
     if (preg_match('/^PublicKey\s*=\s*(.+)$/m', $conf_content, $m)) $pubkey = trim($m[1]);
     if (preg_match('/^Endpoint\s*=\s*(.+)$/m', $conf_content, $m)) $endpoint = trim($m[1]);
-    if (preg_match('/^[#\s]*ListenPort\s*=\s*(.+)$/m', $conf_content, $m)) $listen_port = trim($m[1]);
+    if (preg_match('/^#\s*ListenPort\s*=\s*\d+/m', $conf_content)) {
+            $listen_port = "-1";
+        } elseif (preg_match('/^ListenPort\s*=\s*(\d+)/m', $conf_content, $m)) {
+            $listen_port = $m[1];
+        }
     if (preg_match('/^MTU\s*=\s*(.+)$/m', $conf_content, $m)) $mtu = trim($m[1]);
     if (preg_match('/^PersistentKeepalive\s*=\s*(\d+)/m', $conf_content, $m)) $keepalive = intval($m[1]) > 0;
     if (preg_match('/PostUp.*peer\s+([\d.]+)/', $conf_content, $m)) $peer_ip = $m[1];

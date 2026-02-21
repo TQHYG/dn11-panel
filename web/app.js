@@ -1121,12 +1121,45 @@ function showPeerInfo(target) {
         </table>
     `;
 
-    if (info.note) {
-        html += `<div class="alert alert-warning mt-3 mb-0 small"><i class="fa-solid fa-triangle-exclamation me-1"></i>${info.note}</div>`;
-    }
+    // 端口推算逻辑：扫描所有已用端口，推算下一个可用端口（30001起）
+    getNextAvailablePort(target).then(nextPort => {
+        let portHtml = `<div class="mt-3 small text-muted">下一个可用端口号（仅供参考）：<span class="fw-bold">${nextPort}/udp</span></div>`;
+        if (info.note) {
+            html += `<div class="alert alert-warning mt-3 mb-0 small"><i class="fa-solid fa-triangle-exclamation me-1"></i>${info.note}</div>`;
+        }
+        html += portHtml;
+        document.getElementById('peerInfoContent').innerHTML = html;
+    });
 
+    // 先显示基础内容，端口异步补充
     document.getElementById('peerInfoContent').innerHTML = html;
     new bootstrap.Modal(document.getElementById('peerInfoModal')).show();
+}
+
+// 获取下一个可用端口号（自动扫描所有已用端口，返回最大+1，起始30001）
+async function getNextAvailablePort(target) {
+    // 只支持 router/server
+    let apiUrl = API_NODES[target];
+    if (!apiUrl) return '30001';
+    try {
+        // 获取所有 peers
+        let res = await fetch(`${apiUrl}?action=get_peers`);
+        let json = await res.json();
+        if (json.status !== 'success' || !Array.isArray(json.data)) return '30001';
+        // 端口收集
+        let used = json.data.map(p => {
+            let port = p.listen_port;
+            if (typeof port === 'string') port = parseInt(port);
+            return !isNaN(port) && port > 0 ? port : null;
+        }).filter(p => p !== null);
+        let max = used.length > 0 ? Math.max(...used) : 30000;
+        // 防止端口溢出
+        let next = (max >= 30000 ? max + 1 : 30001);
+        if (next > 65535) next = 30001;
+        return next.toString();
+    } catch {
+        return '30001';
+    }
 }
 
 // ============================================================
